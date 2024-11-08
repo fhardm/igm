@@ -1,0 +1,46 @@
+{
+  "modules_preproc": ["load_ncdf",
+                      "include_icemask"],
+  "modules_process": ["iceflow",
+                      "rockflow", 
+                      "time",
+                      "debris_cover",
+                      "thk"
+                    ],
+  "modules_postproc": ["write_ncdf",
+                       "plot2d",
+                       "print_info",
+                       "print_comp",
+                       "write_particles"],
+  "smb_simple_array": [
+                        ["time", "gradabl", "gradacc", "ela", "accmax"],
+                        [ 1400,      0.009,     0.005,  3100,      2.0],
+                        [ 1900,      0.009,     0.005,  3100,      2.0],
+                        [ 2100,      0.009,     0.005,  3300,      2.0],
+                        [ 2200,      0.009,     0.005,  3300,      2.0]
+                      ],
+  "time_start": 1400.0,
+  "time_end": 2200.0,
+  "lncd_input_file": "input_Zmutt.nc",
+  "mask_shapefile": "icemask_Zmutt.shp",
+  "mask_invert": true,
+  "plt2d_live": false,
+  "plt2d_var_max": 150,
+  "time_save": 10.0,
+  "part_tracking_method": "simple",
+  "part_seed_slope": 30,
+  "part_density_seeding": 1,
+  "part_remove_immobile_particles": true,
+  "wncd_vars_to_save": [
+    "topg",
+    "usurf",
+    "thk",
+    "smb",
+    "debthick",
+    "velbar_mag",
+    "velsurf_mag",
+    "uvelsurf",
+    "vvelsurf",
+    "wvelsurf"
+  ]
+}
