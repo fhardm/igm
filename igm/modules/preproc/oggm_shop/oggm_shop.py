@@ -82,19 +82,32 @@ def params(parser):
         "--oggm_sub_entity_mask",
         type=str2bool,
         default=False,
-        help="Ice mask shows individual RGI 7.0G entities within each larger RGI 7.0C complex",
+        help=("Ice mask shows individual RGI 7.0G entities within each larger RGI 7.0C complex "
+              "(this is now unnecessary for igm_v4, but needs confirming since some tidwater stuff is computed as well)"),
     )
     parser.add_argument(
         "--oggm_RGI_product",
         type=str,
         default="G",
-        help="Glacier complexes (C) or individual basins (G) (default is G, individual basins)",
+        help="RGI7 Glacier complexes (C) or individual basins (G) (default is G, individual basins)",
+    )
+    parser.add_argument(
+        "--oggm_highres",
+        type=str2bool,
+        default=False,
+        help="OGGM offers high resolution data glacier directories, this will use it if available",
     )
     parser.add_argument(
         "--oggm_run_batch",
         type=str2bool,
         default=False,
         help="Run all the glaciers in the world",
+    )
+    parser.add_argument(
+        "--smooth_obs_vel",
+        type=str2bool,
+        default=True,
+        help="Smooth the observed velocities",
     )
 
 def initialize(params, state):
@@ -126,7 +139,7 @@ def initialize(params, state):
         pyproj_srs = nc.pyproj_srs
     else:
         pyproj_srs = None
-    
+
     #If you know that grids above a certain size are going to make your GPU memory explode,
     #activating this commented block and setting the number in the if statement to your
     #maximum threshold will cause IGM to skip execution and move on to the next one
@@ -174,15 +187,12 @@ def initialize(params, state):
             uvelsurfobs = np.flipud(
                 np.squeeze(nc.variables["millan_vx"]).astype("float32")
             )
-            uvelsurfobs = np.where(np.isnan(uvelsurfobs), 0, uvelsurfobs)
-
             uvelsurfobs = np.where(icemaskobs, uvelsurfobs, 0)
             vars_to_save += ["uvelsurfobs"]
         if "millan_vy" in nc.variables:
             vvelsurfobs = np.flipud(
                 np.squeeze(nc.variables["millan_vy"]).astype("float32")
             )
-            vvelsurfobs = np.where(np.isnan(vvelsurfobs), 0, vvelsurfobs)
             vvelsurfobs = np.where(icemaskobs, vvelsurfobs, 0)
             vars_to_save += ["vvelsurfobs"]
         else:
@@ -195,19 +205,18 @@ def initialize(params, state):
             uvelsurfobs = np.flipud(
                 np.squeeze(nc.variables["itslive_vx"]).astype("float32")
             )
-            uvelsurfobs = np.where(np.isnan(uvelsurfobs), 0, uvelsurfobs)
             uvelsurfobs = np.where(icemaskobs, uvelsurfobs, 0)
             vars_to_save += ["uvelsurfobs"]
         if "itslive_vy" in nc.variables:
             vvelsurfobs = np.flipud(
                 np.squeeze(nc.variables["itslive_vy"]).astype("float32")
             )
-            vvelsurfobs = np.where(np.isnan(vvelsurfobs), 0, vvelsurfobs)
             vvelsurfobs = np.where(icemaskobs, vvelsurfobs, 0)
             vars_to_save += ["vvelsurfobs"]
 
-    uvelsurfobs = scipy.signal.medfilt2d(uvelsurfobs, kernel_size=3) # remove outliers
-    vvelsurfobs = scipy.signal.medfilt2d(vvelsurfobs, kernel_size=3) # remove outliers
+    if params.smooth_obs_vel:
+       uvelsurfobs = scipy.signal.medfilt2d(uvelsurfobs, kernel_size=3) # remove outliers
+       vvelsurfobs = scipy.signal.medfilt2d(vvelsurfobs, kernel_size=3) # remove outliers
 
     if params.oggm_thk_source in nc.variables: # either "millan_ice_thickness" or "consensus_ice_thickness"
         thkinit = np.flipud(
@@ -385,7 +394,11 @@ def _oggm_util(RGIs, params):
             )
         else:
             rgi_ids = RGIs
-            base_url = ( "https://cluster.klima.uni-bremen.de/~oggm/gdirs/oggm_v1.6/exps/igm_v3" )
+            if params.oggm_highres:
+                base_url = ( "https://cluster.klima.uni-bremen.de/~oggm/gdirs/oggm_v1.6/exps/igm_v4_hr" )
+            else:
+                base_url = ( "https://cluster.klima.uni-bremen.de/~oggm/gdirs/oggm_v1.6/exps/igm_v4" )
+
             gdirs = workflow.init_glacier_directories(
                 # Start from level 3 if you want some climate data in them
                 rgi_ids,
