@@ -41,9 +41,9 @@ def params(parser):
     )
     parser.add_argument(
         "--part_density_seeding",
-        type=float,
-        default=1,
-        help="Debris input rate (or seeding density) in mm/yr in a given seeding area.",
+        type=list,
+        default=[],
+        help="Debris input rate (or seeding density) in mm/yr in a given seeding area, user-defined as a list with d_in values by year.",
     )
     parser.add_argument(
         "--part_seed_slope",
@@ -93,6 +93,47 @@ def params(parser):
     )
 
 def initialize(params, state):
+    # initialize the seeding
+    state = initialize_seeding(params, state)
+    
+    # initialize the debris thickness
+    state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    
+    # initialize mass balance; TO DO: remove SMB from debris_cover.py and call it from smb_simple.py, only do debris cover specific adjustments here
+    if params.smb_simple_array == []:
+        state.smbpar = np.loadtxt(
+            params.smb_simple_file,
+            skiprows=1,
+            dtype=np.float32,
+        )
+    else:
+        state.smbpar = np.array(params.smb_simple_array[1:]).astype(np.float32)
+
+    state.tcomp_smb_simple = []
+    state.tlast_mb = tf.Variable(-1.0e5000)
+    state.smb = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+
+ 
+def update(params, state):
+    # update the particle tracking by calling the particles function, adapted from module particles.py
+    state = deb_particles(params, state)
+    
+    # update debris thickness based on particle count in grid cells, at every SMB update time step
+    if (state.t.numpy() - state.tlast_mb) == 0:
+        counts = deb_count_particles_in_grid(params, state) # count particles and their volumes in grid cells
+        state.debthick.assign(counts / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
+        mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
+        state.debthick.assign(tf.where(mask, 0.0, state.debthick))
+        
+    # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
+    state = deb_smb(params, state)
+
+def finalize(params, state):
+    pass
+
+
+
+def initialize_seeding(params, state):
     # initialize particle seeding
     state.tlast_seeding = -1.0e5000
     state.tcomp_particles = []
@@ -116,14 +157,18 @@ def initialize(params, state):
     # Currently only seeding based on slope implemented, but can be extended to other conditions
     if params.part_seeding_type == "conditions":
         state.gridseed = np.ones_like(state.thk, dtype=bool)
-        params.volume_per_particle = params.part_frequency_seeding * params.part_density_seeding/1000 * state.dx**2 # Volume per particle in m3
               
         # compute the gradient of the ice surface
         dzdx , dzdy = compute_gradient_tf(state.usurf,state.dx,state.dx)
         slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+        
+        # initialize d_in array
+        if params.part_density_seeding != []:
+            state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
+        
         # seed where gridseed is True and the slope is steep
         state.gridseed = state.gridseed & np.array(slope_rad > params.part_seed_slope/180*np.pi)
-
+        
     # Seeding based on shapefile, adapted from include_icemask (Andreas Henz) NOT WORKING YET    
     elif params.part_seeding_type == "shapefile":
         # read_shapefile
@@ -153,9 +198,12 @@ def initialize(params, state):
         mask_values = np.array(mask_values, dtype=np.float32)
         mask_values = mask_values.reshape(state.X.shape)
 
+        # initialize d_in array
+        if params.part_density_seeding != []:
+            state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
+        
         # define debrismask
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
-        params.volume_per_particle = params.part_frequency_seeding * params.part_density_seeding/1000 * state.dx**2 # Volume per particle in m3
         
         # if gridseed is empty, raise an error
         if not np.any(state.gridseed):
@@ -202,49 +250,13 @@ def initialize(params, state):
         dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
         slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
 
+        # initialize d_in array
+        if params.part_density_seeding != []:
+            state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
+        
         # apply the gradient condition on the shapefile mask
         state.gridseed = state.gridseed & np.array(slope_rad > params.part_seed_slope / 180 * np.pi)
-        params.volume_per_particle = params.part_frequency_seeding * params.part_density_seeding/1000 * state.dx**2 # Volume per particle in m3
-        print("Seeding frequency: ", params.part_frequency_seeding, " years")
-        print("volume_per_particle: ", params.volume_per_particle, " m3")
-
-    # initialize the debris thickness
-    state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-
-    
-    # initialize mass balance
-    if params.smb_simple_array == []:
-        state.smbpar = np.loadtxt(
-            params.smb_simple_file,
-            skiprows=1,
-            dtype=np.float32,
-        )
-    else:
-        state.smbpar = np.array(params.smb_simple_array[1:]).astype(np.float32)
-
-    state.tcomp_smb_simple = []
-    state.tlast_mb = tf.Variable(-1.0e5000)
-    state.smb = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-
- 
-def update(params, state):
-    # update the particle tracking by calling the particles function, adapted from module particles.py
-    state = deb_particles(params, state)
-    
-    # update debris thickness based on particle count in grid cells
-    if (state.t.numpy() - state.tlast_mb) >= params.smb_simple_update_freq:
-        counts = deb_count_particles_in_grid(params, state) # count particles in grid cells
-        state.debthick.assign(counts * params.volume_per_particle / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
-        mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
-        state.debthick.assign(tf.where(mask, 0.0, state.debthick))
-        
-    # update the mass balance (smb) depending by debris thickness, adapted from module smb_simple.py
-    state = deb_smb(params, state)
-
-
-def finalize(params, state):
-    pass
-
+    return state
 
 # Seeding of particles, adapted from particles.py (Guillaume Jouvet)
 def deb_seeding_particles(params, state):
@@ -255,12 +267,21 @@ def deb_seeding_particles(params, state):
     here we seed only the accum. area (+ a bit more), where there is
     significant ice, with a density of part_density_seeding particles per grid cell.
     """
+    # Calculating volume per particle
+    if params.part_density_seeding == []:
+        state.d_in = 1.0
+    else:
+        state.d_in = interp1d_tf(state.d_in_array[:, 0], state.d_in_array[:, 1], state.t)
+        
+    state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
+    
+    # Seeding
     I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
     state.nparticle_x  = state.X[I] - state.x[0]            # x position of the particle
     state.nparticle_y  = state.Y[I] - state.y[0]            # y position of the particle
     state.nparticle_z  = state.usurf[I]                     # z position of the particle
     state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
-    state.nparticle_w  = tf.ones_like(state.X[I])           # weight of the particle
+    state.nparticle_w  = tf.ones_like(state.X[I]) * state.volume_per_particle   # weight of the particle
     state.nparticle_t  = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
     state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
     state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
@@ -270,21 +291,23 @@ def deb_seeding_particles(params, state):
 def deb_particles(params, state):
     if hasattr(state, "logger"):
         state.logger.info("Update particle tracking at time : " + str(state.t.numpy()))
+        
     if (state.t.numpy() - state.tlast_seeding) >= params.part_frequency_seeding:
         deb_seeding_particles(params, state)
+        
         # merge the new seeding points with the former ones
         state.particle_x = tf.Variable(tf.concat([state.particle_x, state.nparticle_x], axis=-1),trainable=False)
         state.particle_y = tf.Variable(tf.concat([state.particle_y, state.nparticle_y], axis=-1),trainable=False)
         state.particle_z = tf.Variable(tf.concat([state.particle_z, state.nparticle_z], axis=-1),trainable=False)
         state.particle_r = tf.Variable(tf.concat([state.particle_r, state.nparticle_r], axis=-1),trainable=False)
-        state.particle_w = tf.Variable(tf.concat([state.particle_w, state.nparticle_w], axis=-1),trainable=False)
+        state.particle_w = tf.Variable(tf.concat([state.particle_w, state.nparticle_w], axis=-1),trainable=False)   
         state.particle_t = tf.Variable(tf.concat([state.particle_t, state.nparticle_t], axis=-1),trainable=False)
         state.particle_englt = tf.Variable(tf.concat([state.particle_englt, state.nparticle_englt], axis=-1),trainable=False)
         state.particle_topg = tf.Variable(tf.concat([state.particle_topg, state.nparticle_topg], axis=-1),trainable=False)
         state.particle_thk = tf.Variable(tf.concat([state.particle_thk, state.nparticle_thk], axis=-1),trainable=False)
         
         state.tlast_seeding = state.t.numpy()
-    
+
     if (state.particle_x.shape[0]>0)&(state.it >= 0):
         state.tcomp_particles.append(time.time())
         
@@ -410,7 +433,7 @@ def deb_particles(params, state):
         state.weight_particles = tf.tensor_scatter_nd_add(
             tf.zeros_like(state.thk), indices, updates
         )
-
+        
         # compute the englacial time
         state.particle_englt = state.particle_englt + tf.cast(
             tf.where(state.particle_r < 1, state.dt, 0.0), dtype="float32"
@@ -435,7 +458,7 @@ def deb_particles(params, state):
             state.particle_thk = tf.boolean_mask(state.particle_thk, J)
             state.particle_topg = tf.boolean_mask(state.particle_topg, J)
             
-        return state
+    return state
 
 
 # Count surface particles in grid cells
@@ -462,52 +485,24 @@ def deb_count_particles_in_grid(params, state):
     # Initialize a 2D array to hold the counts
     counts = np.zeros_like(state.usurf, dtype=int)
     
-    # Count particles in each grid cell
-    for x, y in zip(grid_particle_x, grid_particle_y):
+    # Count particles in each grid cell and add their assigned volume
+    for x, y, w in zip(grid_particle_x, grid_particle_y, state.particle_w[mask]):
         if 0 <= x < counts.shape[0] and 0 <= y < counts.shape[1]:
-            counts[x, y] += 1
+            counts[x, y] += w
     return counts
 
 
 # debris-covered mass balance computation, adapted from smb_simple.py (Guillaume Jouvet)
 def deb_smb(params, state):
-    # update smb each X years
-    if (state.t - state.tlast_mb) >= params.smb_simple_update_freq:
-        if hasattr(state, "logger"):
-            state.logger.info(
-                "Construct mass balance at time : " + str(state.t.numpy())
-            )
-
-        state.tcomp_smb_simple.append(time.time())
-
-        # get the smb parameters at given time t
-        gradabl = interp1d_tf(state.smbpar[:, 0], state.smbpar[:, 1], state.t)
-        gradacc = interp1d_tf(state.smbpar[:, 0], state.smbpar[:, 2], state.t)
-        ela = interp1d_tf(state.smbpar[:, 0], state.smbpar[:, 3], state.t)
-        maxacc = interp1d_tf(state.smbpar[:, 0], state.smbpar[:, 4], state.t)
-
-        # compute smb from glacier surface elevation and parameters
-        state.smb = state.usurf - ela
-        state.smb *= tf.where(tf.less(state.smb, 0), gradabl, gradacc)
-        state.smb = tf.clip_by_value(state.smb, -100, maxacc)
+    # update debris-SMB whenever SMB is updated (tlast_mb is set to state.t in smb_simple.py)
+    if (state.t - state.tlast_mb) == 0:
         
         # adjust smb based on debris thickness
         if hasattr(state, "debthick"):
             mask = state.debthick > 0
             state.smb = tf.where(mask, state.smb * params.smb_oestrem_D0 / (params.smb_oestrem_D0 + state.debthick), state.smb)
-
-        # if an icemask exists, then force negative smb aside to prevent leaks
-        if hasattr(state, "icemask"):
-            state.smb = tf.where(
-                (state.smb < 0) | (state.icemask > 0.5), state.smb, -10
-            )
-
-        state.tlast_mb.assign(state.t)
-
-        state.tcomp_smb_simple[-1] -= time.time()
-        state.tcomp_smb_simple[-1] *= -1
         
-        return state
+    return state
 
 
 # Conversion functions for zeta and rhs

@@ -61,12 +61,13 @@ def update(params, state):
                     state.particle_t,
                     state.particle_englt,
                     state.particle_topg,
-                    state.particle_thk
+                    state.particle_thk,
+                    state.particle_w
                 ],
                 axis=0,
             )
         )
-        np.savetxt(f, array, delimiter=",", fmt="%.2f", header="Id,x,y,z,rh,t,englt,topg,thk")
+        np.savetxt(f, array, delimiter=",", fmt="%.2f", header="Id,x,y,z,rh,t,englt,topg,thk,w")
 
         ft = os.path.join("trajectories", "time.dat")
         with open(ft, "a") as f:
