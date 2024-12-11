@@ -98,22 +98,7 @@ def initialize(params, state):
     
     # initialize the debris thickness
     state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-    
-    # initialize mass balance; TO DO: remove SMB from debris_cover.py and call it from smb_simple.py, only do debris cover specific adjustments here
-    if params.smb_simple_array == []:
-        state.smbpar = np.loadtxt(
-            params.smb_simple_file,
-            skiprows=1,
-            dtype=np.float32,
-        )
-    else:
-        state.smbpar = np.array(params.smb_simple_array[1:]).astype(np.float32)
 
-    state.tcomp_smb_simple = []
-    state.tlast_mb = tf.Variable(-1.0e5000)
-    state.smb = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-
- 
 def update(params, state):
     # update the particle tracking by calling the particles function, adapted from module particles.py
     state = deb_particles(params, state)
