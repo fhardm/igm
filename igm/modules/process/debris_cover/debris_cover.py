@@ -48,15 +48,15 @@ def params(parser):
     parser.add_argument(
         "--part_seed_slope",
         type=int,
-        default=30,
-        help="Minimum slope to seed particles (in degrees) for the part_seed_where_steep option",
+        default=45,
+        help="Minimum slope to seed particles (in degrees) for part_seeding_type = 'conditions'",
     )
     
     # Particle tracking
     parser.add_argument(
         "--part_tracking_method",
         type=str,
-        default="simple",
+        default="3d",
         help="Method for tracking particles (simple or 3d)",
     )
     parser.add_argument(
@@ -73,24 +73,7 @@ def params(parser):
         default=0.065,
         help="Characteristic debris thickness in Oestrem curve calculation (default: 0.065)",
     )
-    parser.add_argument(
-        "--smb_simple_update_freq",
-        type=float,
-        default=1,
-        help="Update the mass balance each X years (1)",
-    )
-    parser.add_argument(
-        "--smb_simple_file",
-        type=str,
-        default="smb_simple_param.txt",
-        help="Name of the imput file for the simple mass balance model (time, gradabl, gradacc, ela, accmax)",
-    )
-    parser.add_argument(
-        "--smb_simple_array",
-        type=list,
-        default=[],
-        help="Time dependent parameters for simple mass balance model (time, gradabl, gradacc, ela, accmax)",
-    )
+
 
 def initialize(params, state):
     # initialize the seeding
@@ -103,12 +86,8 @@ def update(params, state):
     # update the particle tracking by calling the particles function, adapted from module particles.py
     state = deb_particles(params, state)
     
-    # update debris thickness based on particle count in grid cells, at every SMB update time step
-    if (state.t.numpy() - state.tlast_mb) == 0:
-        counts = deb_count_particles_in_grid(params, state) # count particles and their volumes in grid cells
-        state.debthick.assign(counts / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
-        mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
-        state.debthick.assign(tf.where(mask, 0.0, state.debthick))
+    # update debris thickness based on particle count in grid cells (at every SMB update time step)
+    state = deb_thickness(state)
         
     # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
     state = deb_smb(params, state)
@@ -243,34 +222,6 @@ def initialize_seeding(params, state):
         state.gridseed = state.gridseed & np.array(slope_rad > params.part_seed_slope / 180 * np.pi)
     return state
 
-# Seeding of particles, adapted from particles.py (Guillaume Jouvet)
-def deb_seeding_particles(params, state):
-    """
-    here we define (particle_x,particle_y) the horiz coordinate of tracked particles
-    and particle_r is the relative position in the ice column (scaled bwt 0 and 1)
-
-    here we seed only the accum. area (+ a bit more), where there is
-    significant ice, with a density of part_density_seeding particles per grid cell.
-    """
-    # Calculating volume per particle
-    if params.part_density_seeding == []:
-        state.d_in = 1.0
-    else:
-        state.d_in = interp1d_tf(state.d_in_array[:, 0], state.d_in_array[:, 1], state.t)
-        
-    state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
-    
-    # Seeding
-    I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
-    state.nparticle_x  = state.X[I] - state.x[0]            # x position of the particle
-    state.nparticle_y  = state.Y[I] - state.y[0]            # y position of the particle
-    state.nparticle_z  = state.usurf[I]                     # z position of the particle
-    state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
-    state.nparticle_w  = tf.ones_like(state.X[I]) * state.volume_per_particle   # weight of the particle
-    state.nparticle_t  = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
-    state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
-    state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
-    state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
 
 # Particle tracking, adapted from particles.py (Guillaume Jouvet)
 def deb_particles(params, state):
@@ -446,8 +397,59 @@ def deb_particles(params, state):
     return state
 
 
+# Seeding of particles, adapted from particles.py (Guillaume Jouvet)
+def deb_seeding_particles(params, state):
+    """
+    here we define (particle_x,particle_y) the horiz coordinate of tracked particles
+    and particle_r is the relative position in the ice column (scaled bwt 0 and 1)
+
+    here we seed only the accum. area (+ a bit more), where there is
+    significant ice, with a density of part_density_seeding particles per grid cell.
+    """
+    # Calculating volume per particle
+    if params.part_density_seeding == []:
+        state.d_in = 1.0
+    else:
+        state.d_in = interp1d_tf(state.d_in_array[:, 0], state.d_in_array[:, 1], state.t)
+        
+    state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
+    
+    # Seeding
+    I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
+    state.nparticle_x  = state.X[I] - state.x[0]            # x position of the particle
+    state.nparticle_y  = state.Y[I] - state.y[0]            # y position of the particle
+    state.nparticle_z  = state.usurf[I]                     # z position of the particle
+    state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
+    state.nparticle_w  = tf.ones_like(state.X[I]) * state.volume_per_particle   # weight of the particle
+    state.nparticle_t  = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
+    state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
+    state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
+    state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
+    
+
+def deb_thickness(state):
+    """
+    Calculates debris thickness based on particle volumes counted per pixel.
+    
+    Parameters:
+    params (object): An object containing parameters required for the calculation.
+    state (object): An object representing the current state of the glacier, including
+                    attributes such as time, debris thickness, surface mass balance,
+                    and thickness.
+    Returns:
+    state: The function updates the `debthick` attribute of the `state` object in place.
+    """
+    
+    if (state.t.numpy() - state.tlast_mb) == 0:
+        counts = deb_count_particles_in_grid(state) # count particles and their volumes in grid cells
+        state.debthick.assign(counts / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
+        mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
+        state.debthick.assign(tf.where(mask, 0.0, state.debthick))
+
+    return state
+
 # Count surface particles in grid cells
-def deb_count_particles_in_grid(params, state):
+def deb_count_particles_in_grid(state):
     """
     Count particle coordinates within a grid cell.
 
@@ -455,7 +457,7 @@ def deb_count_particles_in_grid(params, state):
     state (object): An object containing particle coordinates (particle_x, particle_y) and grid cell boundaries (X, Y).
 
     Returns:
-    np.ndarray: A 2D array with the count of particles in each grid cell.
+    counts: A 2D array with the count of particles in each grid cell.
     """
     # Filter particles where particle_r is 1 (debris on the surface)
     mask = state.particle_r == 1
@@ -474,6 +476,7 @@ def deb_count_particles_in_grid(params, state):
     for x, y, w in zip(grid_particle_x, grid_particle_y, state.particle_w[mask]):
         if 0 <= x < counts.shape[0] and 0 <= y < counts.shape[1]:
             counts[x, y] += w
+    
     return counts
 
 
