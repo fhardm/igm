@@ -12,7 +12,7 @@
                        "plot2d",
                        "print_info",
                        "print_comp",
-                       "write_particles"],
+                       "write_debris"],
   "smb_simple_array": [
                         ["time", "gradabl", "gradacc", "ela", "accmax"],
                         [ 0,         0.009,     0.005,  3050,      2.0],
@@ -22,7 +22,7 @@
                       ],
   "time_start": 0.0,
   "time_end": 2000.0,
-  "lncd_input_file": "input_Zmutt.nc",
+  "lncd_input_file": "input_Zmutt_50m_new.nc",
   "lncd_crop": true,
   "lncd_xmin": 390000,
   "lncd_xmax": 400400,
@@ -35,6 +35,8 @@
   "time_save": 10.0,
   "part_seeding_type": "conditions",
   "part_debrismask_shapefile": "debrismask_Zmutt.shp",
+  "part_initial_rockfall": true,
+  "part_max_runout": 0.5,
   "part_tracking_method": "3d",
   "part_seed_slope": 45,
   "part_density_seeding": [
