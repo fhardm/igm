@@ -51,6 +51,18 @@ def params(parser):
         default=45,
         help="Minimum slope to seed particles (in degrees) for part_seeding_type = 'conditions'",
     )
+    parser.add_argument(
+        "--part_initial_rockfall",
+        type=int,
+        default=False,
+        help="Moves particles right after seeding to a slope lower than part_seed_slope (default: False)",
+    )
+    parser.add_argument(
+        "--part_max_runout",
+        type=int,
+        default=0.5,
+        help="Maximum runout factor for particles after initial rockfall (default: 0.5), as a fraction of the previous rockfall distance. Particles will be uniformly distributed between 0 and this value.",
+    )
     
     # Particle tracking
     parser.add_argument(
@@ -107,11 +119,13 @@ def initialize_seeding(params, state):
     state.particle_y = tf.Variable([])
     state.particle_z = tf.Variable([])
     state.particle_r = tf.Variable([])
-    state.particle_w = tf.Variable([])  # this is to give a weight to the particle
+    state.particle_w = tf.Variable([])  # debris volume equivalent to the particle
     state.particle_t = tf.Variable([])
-    state.particle_englt = tf.Variable([])  # this copute the englacial time
+    state.particle_englt = tf.Variable([])  # englacial time
     state.particle_topg = tf.Variable([])
     state.particle_thk = tf.Variable([])
+    state.particle_srcid = tf.Variable([]) # source area id from debris mask shapefile (if used)
+    state.srcid = tf.zeros_like(state.thk, dtype=tf.float32)
     
     state.pswvelbase = tf.Variable(tf.zeros_like(state.thk),trainable=False)
     state.pswvelsurf = tf.Variable(tf.zeros_like(state.thk),trainable=False)
@@ -124,14 +138,14 @@ def initialize_seeding(params, state):
               
         # compute the gradient of the ice surface
         dzdx , dzdy = compute_gradient_tf(state.usurf,state.dx,state.dx)
-        slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
         
         # initialize d_in array
         if params.part_density_seeding != []:
             state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
         
         # seed where gridseed is True and the slope is steep
-        state.gridseed = state.gridseed & np.array(slope_rad > params.part_seed_slope/180*np.pi)
+        state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope/180*np.pi)
         
     # Seeding based on shapefile, adapted from include_icemask (Andreas Henz) NOT WORKING YET    
     elif params.part_seeding_type == "shapefile":
@@ -142,34 +156,40 @@ def initialize_seeding(params, state):
         flat_X = state.X.numpy().flatten()
         flat_Y = state.Y.numpy().flatten()
 
-        # Create a list to store the mask values
+        # Create lists to store the mask values and source IDs
         mask_values = []
+        srcid_values = []
 
         # Iterate over each grid point
         for x, y in zip(flat_X, flat_Y):
             point = Point(x, y)
             inside_polygon = False
+            srcid = -1  # Default value if point is not inside any polygon
 
             # Check if the point is inside any polygon in the GeoDataFrame
-            for geom in gdf.geometry:
+            for idx, geom in enumerate(gdf.geometry):
                 if point.within(geom):
                     inside_polygon = True
+                    srcid = gdf.iloc[idx]['FID']  # Get the FID of the polygon
                     break  # if it is inside one polygon, don't check for others
 
-            # Append the corresponding mask value to the list
-            mask_values.append(1 if inside_polygon else 0) # inverted from include_icemask.py, 1 for debris input area, 0 for no debris
-        # reshape
-        mask_values = np.array(mask_values, dtype=np.float32)
-        mask_values = mask_values.reshape(state.X.shape)
+            # Append the corresponding mask value and source ID to the lists
+            mask_values.append(1 if inside_polygon else 0)  # 1 for debris input area, 0 for no debris
+            srcid_values.append(srcid)
 
-        # initialize d_in array
+        # Reshape
+        mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
+        srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
+
+        # Initialize d_in array
         if params.part_density_seeding != []:
             state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
         
-        # define debrismask
+        # Define debrismask and srcid
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
+        state.srcid = tf.constant(srcid_values, dtype=tf.float32)
         
-        # if gridseed is empty, raise an error
+        # If gridseed is empty, raise an error
         if not np.any(state.gridseed):
             raise ValueError("Shapefile not within icemask! Watch out for coordinate system!")
         
@@ -184,27 +204,32 @@ def initialize_seeding(params, state):
 
         # Create a list to store the mask values
         mask_values = []
-
+        srcid_values = []
+        
         # Iterate over each grid point
         for x, y in zip(flat_X, flat_Y):
             point = Point(x, y)
             inside_polygon = False
+            srcid = -1  # Default value if point is not inside any polygon
 
             # Check if the point is inside any polygon in the GeoDataFrame
-            for geom in gdf.geometry:
+            for idx, geom in enumerate(gdf.geometry):
                 if point.within(geom):
                     inside_polygon = True
+                    srcid = gdf.iloc[idx]['FID']  # Get the FID of the polygon
                     break  # if it is inside one polygon, don't check for others
 
-            # Append the corresponding mask value to the list
-            mask_values.append(1 if inside_polygon else 0) # inverted from include_icemask.py, 1 for debris input area, 0 for no debris
+            # Append the corresponding mask value and source ID to the lists
+            mask_values.append(1 if inside_polygon else 0)  # 1 for debris input area, 0 for no debris
+            srcid_values.append(srcid)
 
-        # reshape
-        mask_values = np.array(mask_values, dtype=np.float32)
-        mask_values = mask_values.reshape(state.X.shape)
+        # Reshape
+        mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
+        srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
 
-        # define debrismask
+        # define debrismask and srcid
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
+        state.srcid = tf.constant(srcid_values, dtype=tf.float32)
         
         # if gridseed is empty, raise an error
         if not np.any(state.gridseed):
@@ -212,14 +237,44 @@ def initialize_seeding(params, state):
 
         # compute the gradient of the ice surface
         dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
-        slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
 
         # initialize d_in array
         if params.part_density_seeding != []:
             state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
         
         # apply the gradient condition on the shapefile mask
-        state.gridseed = state.gridseed & np.array(slope_rad > params.part_seed_slope / 180 * np.pi)
+        state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope / 180 * np.pi)
+        
+    elif params.part_seeding_type == "slope_shp":
+        # read_shapefile
+        gdf = read_shapefile(params.part_debrismask_shapefile)
+
+        # Flatten the X and Y coordinates and convert to numpy
+        flat_X = state.X.numpy().flatten()
+        flat_Y = state.Y.numpy().flatten()
+        # Initialize an array to store the fraction of area per pixel inside the polygons
+        fraction_area = np.zeros_like(state.X, dtype=np.float32)
+
+        # Iterate over each grid cell
+        for i in range(state.X.shape[0]):
+            for j in range(state.X.shape[1]):
+                # Create a polygon representing the grid cell
+                cell_polygon = Point(state.X[i, j], state.Y[i, j]).buffer(state.dx / 2, cap_style = 3)
+
+                # Calculate the intersection area with each polygon in the GeoDataFrame
+                intersection_area = 0.0
+                for geom in gdf.geometry:
+                    intersection_area += cell_polygon.intersection(geom).area
+
+                # Calculate the fraction of the grid cell area inside the polygons
+                fraction_area[i, j] = intersection_area / cell_polygon.area
+
+        # Convert the fraction_area array to a TensorFlow constant
+        state.gridseed_fraction = tf.constant(fraction_area, dtype=tf.float32)
+        print("Fraction area shape:", state.gridseed_fraction.shape)
+        state.gridseed = tf.cast(state.gridseed_fraction > 0, dtype=tf.bool)    
+        
     return state
 
 
@@ -241,7 +296,8 @@ def deb_particles(params, state):
         state.particle_englt = tf.Variable(tf.concat([state.particle_englt, state.nparticle_englt], axis=-1),trainable=False)
         state.particle_topg = tf.Variable(tf.concat([state.particle_topg, state.nparticle_topg], axis=-1),trainable=False)
         state.particle_thk = tf.Variable(tf.concat([state.particle_thk, state.nparticle_thk], axis=-1),trainable=False)
-        
+        state.particle_srcid = tf.Variable(tf.concat([state.particle_srcid, state.nparticle_srcid], axis=-1),trainable=False)
+
         state.tlast_seeding = state.t.numpy()
 
     if (state.particle_x.shape[0]>0)&(state.it >= 0):
@@ -393,6 +449,7 @@ def deb_particles(params, state):
             state.particle_englt = tf.boolean_mask(state.particle_englt, J)
             state.particle_thk = tf.boolean_mask(state.particle_thk, J)
             state.particle_topg = tf.boolean_mask(state.particle_topg, J)
+            state.particle_srcid = tf.boolean_mask(state.particle_srcid, J)
             
     return state
 
@@ -414,6 +471,21 @@ def deb_seeding_particles(params, state):
         
     state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
     
+    # Randomized seeding based on high-res slope threshold
+    if params.part_seeding_type == "slope_shp":
+        # Determine where to seed particles based on the probability (gridseed_fraction)
+        seeding_mask = np.random.rand(*state.gridseed_fraction.shape) < state.gridseed_fraction
+        # Apply the seeding mask to the gridseed
+        state.gridseed = tf.cast(seeding_mask, dtype=tf.bool)
+    elif params.part_seeding_type == "conditions" or params.part_seeding_type == "both":
+        # Compute the gradient of the current land/ice surface
+        dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
+        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+        state.aspect_rad = -tf.atan2(dzdx, -dzdy)
+        
+        # apply the gradient condition on gridseed
+        state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope / 180 * np.pi)
+    
     # Seeding
     I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
     state.nparticle_x  = state.X[I] - state.x[0]            # x position of the particle
@@ -425,8 +497,99 @@ def deb_seeding_particles(params, state):
     state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
     state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
     state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
+    state.nparticle_srcid = state.srcid[I]                  # source area id from debris mask shapefile (if used)
+    
+    if params.part_initial_rockfall:
+        state = deb_initial_rockfall(params, state)
     
 
+def deb_initial_rockfall(params, state):
+    """
+    Moves the particle in x, y, and z direction along the surface gradient right after seeding until it reaches a slope lower than the given threshold (part_seed_slope). 
+    This is supposed to simulate rockfall, moving the particles instantaneously to a lower slope, where they are more likely to enter a real glacier.
+    
+    Parameters:
+    params (object): An object containing parameters required for the calculation.
+    state (object): An object representing the current state of the glacier, including
+                    attributes such as particle positions and velocities.
+    
+    Returns:
+    state: The function updates the particle positions in the `state` object in place.
+    """
+    moving_particles = tf.ones_like(state.nparticle_x, dtype=tf.bool)
+    iteration_count = 0
+    max_iterations = 1000 / state.dx # Maximum number of iterations to prevent infinite loop (caused by infinitely oscillating particles)
+    
+    # Save initial positions
+    initial_x = state.nparticle_x
+    initial_y = state.nparticle_y
+    
+    while tf.reduce_any(moving_particles) and iteration_count < max_iterations:
+                
+        # Interpolate particle positions to grid indices
+        i = state.nparticle_x / state.dx
+        j = state.nparticle_y / state.dx
+        indices = tf.expand_dims(
+            tf.concat(
+                [tf.expand_dims(j, axis=-1), tf.expand_dims(i, axis=-1)], axis=-1
+            ),
+            axis=0,
+        )
+        
+        # Interpolate slope at particle positions
+        particle_slope = interpolate_bilinear_tf(
+            tf.expand_dims(tf.expand_dims(state.slope_rad, axis=0), axis=-1),
+            indices,
+            indexing="ij",
+        )[0, :, 0]
+        
+        # Interpolate aspect at particle positions
+        particle_aspect = interpolate_bilinear_tf(
+            tf.expand_dims(tf.expand_dims(state.aspect_rad, axis=0), axis=-1),
+            indices,
+            indexing="ij",
+        )[0, :, 0]
+        
+        # Update moving_particles mask (remove particles that have reached a slope lower than the threshold in the previous iteration)
+        moving_particles = moving_particles & (particle_slope >= params.part_seed_slope / 180 * np.pi)
+        
+        # Move only the particles that are still moving
+        if tf.reduce_any(moving_particles):
+            # Move particles along the aspect direction
+            state.nparticle_x = tf.where(moving_particles, state.nparticle_x + tf.sin(particle_aspect) * state.dx, state.nparticle_x)
+            state.nparticle_y = tf.where(moving_particles, state.nparticle_y + tf.cos(particle_aspect) * state.dx, state.nparticle_y)
+                
+            # Ensure particles remain within the domain
+            state.nparticle_x = tf.clip_by_value(state.nparticle_x, 0, state.x[-1] - state.x[0])
+            state.nparticle_y = tf.clip_by_value(state.nparticle_y, 0, state.y[-1] - state.y[0])
+        
+        iteration_count += 1
+    
+    # Calculate the difference between the final and initial positions
+    diff_x = state.nparticle_x - initial_x
+    diff_y = state.nparticle_y - initial_y
+    
+    # Apply an additional runout factor to the differences and add to the positions
+    runout_factor = np.random.uniform(0, params.part_max_runout, size=diff_x.shape)  # Additional runout of particles after rockfall, uniformly distributed between 0 and 20% of the rockfall distance
+    state.nparticle_x += diff_x * runout_factor
+    state.nparticle_y += diff_y * runout_factor
+
+    # Update particle z positions based on the surface & x, y positions
+    indices = tf.expand_dims(
+        tf.concat(
+            [tf.expand_dims(state.nparticle_y / state.dx, axis=-1), tf.expand_dims(state.nparticle_x / state.dx, axis=-1)], axis=-1
+        ),
+        axis=0,
+    )
+    state.nparticle_z = interpolate_bilinear_tf(
+        tf.expand_dims(tf.expand_dims(state.usurf, axis=0), axis=-1),
+        indices,
+        indexing="ij",
+    )[0, :, 0]
+        
+    return state
+    
+    
 def deb_thickness(state):
     """
     Calculates debris thickness based on particle volumes counted per pixel.
