@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Author: Florian Hardmeier, florian.hardmeier@geo.uzh.ch
-# Date: 01.11.2024
+# First created: 01.11.2024
 
 # Combines particle tracking and mass balance computation for debris-covered glaciers. Seeded particles represent a volume of debris
 # and are tracked through the glacier. After reaching the glacier surface in the ablation area, 
@@ -18,6 +18,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 
 from igm.modules.utils import *
+import pandas as pd
 
 def params(parser):
     # Particle seeding
@@ -77,6 +78,12 @@ def params(parser):
         default=False,
         help="Remove immobile particles (default: False)",
     )
+    parser.add_argument(
+        "--part_moraine_builder",
+        type=bool,
+        default=False,
+        help="Build a moraine using off-glacier immobile particles (default: False)",
+    )
     
     # SMB
     parser.add_argument(
@@ -93,7 +100,8 @@ def initialize(params, state):
     
     # initialize the debris thickness
     state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-
+    state.debthick_offglacier = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    
 def update(params, state):
     # update the particle tracking by calling the particles function, adapted from module particles.py
     state = deb_particles(params, state)
@@ -113,19 +121,20 @@ def initialize_seeding(params, state):
     # initialize particle seeding
     state.tlast_seeding = -1.0e5000
     state.tcomp_particles = []
-
-    # initialize trajectories
-    state.particle_x = tf.Variable([])
-    state.particle_y = tf.Variable([])
-    state.particle_z = tf.Variable([])
-    state.particle_r = tf.Variable([])
-    state.particle_w = tf.Variable([])  # debris volume equivalent to the particle
-    state.particle_t = tf.Variable([])
-    state.particle_englt = tf.Variable([])  # englacial time
-    state.particle_topg = tf.Variable([])
-    state.particle_thk = tf.Variable([])
-    state.particle_srcid = tf.Variable([]) # source area id from debris mask shapefile (if used)
-    state.srcid = tf.zeros_like(state.thk, dtype=tf.float32)
+    
+    # initialize trajectories (if they do not exist already)
+    if not hasattr(state, 'particle_x'):
+        state.particle_x = tf.Variable([])
+        state.particle_y = tf.Variable([])
+        state.particle_z = tf.Variable([])
+        state.particle_r = tf.Variable([])
+        state.particle_w = tf.Variable([])  # debris volume equivalent to the particle
+        state.particle_t = tf.Variable([])
+        state.particle_englt = tf.Variable([])  # englacial time
+        state.particle_topg = tf.Variable([])
+        state.particle_thk = tf.Variable([])
+        state.particle_srcid = tf.Variable([]) # source area id from debris mask shapefile (if used)
+        state.srcid = tf.zeros_like(state.thk, dtype=tf.float32)
     
     state.pswvelbase = tf.Variable(tf.zeros_like(state.thk),trainable=False)
     state.pswvelsurf = tf.Variable(tf.zeros_like(state.thk),trainable=False)
@@ -451,6 +460,26 @@ def deb_particles(params, state):
             state.particle_topg = tf.boolean_mask(state.particle_topg, J)
             state.particle_srcid = tf.boolean_mask(state.particle_srcid, J)
             
+        elif params.part_moraine_builder and (state.t.numpy() - state.tlast_mb) == 0:
+            # reset topography to initial state before re-evaluating the off-glacier debris thickness
+            state.topg = state.topg - state.debthick_offglacier
+        
+            # set state.particle_r of all particles where state.particle_thk == 0 to 1
+            state.particle_r = tf.where(state.particle_thk == 0, tf.ones_like(state.particle_r), state.particle_r)
+            
+            # count particles in grid cells
+            counts = deb_count_particles_in_grid(state)
+            
+            # add the debris thickness of off-glacier particles to the grid cells
+            state.debthick_offglacier.assign(counts / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
+
+            # apply off-glacier mask (where particle_thk < 1)
+            mask = state.thk > 1
+            state.debthick_offglacier.assign(tf.where(mask, 0.0, state.debthick_offglacier))
+            # add the resulting debris thickness to state.topg
+            state.topg = state.topg + state.debthick_offglacier
+
+            
     return state
 
 
@@ -520,9 +549,9 @@ def deb_initial_rockfall(params, state):
     iteration_count = 0
     max_iterations = 1000 / state.dx # Maximum number of iterations to prevent infinite loop (caused by infinitely oscillating particles)
     
-    # Save initial positions
-    initial_x = state.nparticle_x
-    initial_y = state.nparticle_y
+    # Initial positions of the particles
+    initx =  state.nparticle_x
+    inity = state.nparticle_y
     
     while tf.reduce_any(moving_particles) and iteration_count < max_iterations:
                 
@@ -566,8 +595,8 @@ def deb_initial_rockfall(params, state):
         iteration_count += 1
     
     # Calculate the difference between the final and initial positions
-    diff_x = state.nparticle_x - initial_x
-    diff_y = state.nparticle_y - initial_y
+    diff_x = state.nparticle_x - initx
+    diff_y = state.nparticle_y - inity
     
     # Apply an additional runout factor to the differences and add to the positions
     runout_factor = np.random.uniform(0, params.part_max_runout, size=diff_x.shape)  # Additional runout of particles after rockfall, uniformly distributed between 0 and 20% of the rockfall distance
@@ -586,7 +615,14 @@ def deb_initial_rockfall(params, state):
         indices,
         indexing="ij",
     )[0, :, 0]
-        
+    
+    # Save initial positions as state variables
+    if not hasattr(state, 'particle_initx'):
+        state.particle_initx = []
+    if not hasattr(state, 'particle_inity'):
+        state.particle_inity = []
+    state.particle_initx = tf.concat([state.particle_initx, initx], axis=-1)
+    state.particle_inity = tf.concat([state.particle_inity, inity], axis=-1)
     return state
     
     

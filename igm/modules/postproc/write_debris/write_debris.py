@@ -18,8 +18,29 @@ def params(parser):
         default=True,
         help="Add topg",
     )
-
-
+    parser.add_argument(
+        "--wpar_toggle_particles",
+        type=str2bool,
+        default=False,
+        help="Write the final particle properties to a separate CSV file",
+    )
+    parser.add_argument(
+        "--wpar_vars_to_save",
+        nargs='+',
+        default=[
+            "particle_x",
+            "particle_y",
+            "particle_z",
+            "particle_r",
+            "particle_t",
+            "particle_englt",
+            "particle_topg",
+            "particle_thk",
+            "particle_w",
+            "particle_srcid"
+        ],
+        help="List of variables to be recorded in the ncdf file",
+    )
 def initialize(params, state):
     state.tcomp_write_particles = []
 
@@ -50,25 +71,21 @@ def update(params, state):
         )
 
         ID = tf.cast(tf.range(state.particle_x.shape[0]), dtype="float32")
-        array = tf.transpose(
-            tf.stack(
-                [
-                    ID,
-                    state.particle_x.numpy().astype(np.float64) + state.x[0].numpy().astype(np.float64),
-                    state.particle_y.numpy().astype(np.float64) + state.y[0].numpy().astype(np.float64),
-                    state.particle_z,
-                    state.particle_r,
-                    state.particle_t,
-                    state.particle_englt,
-                    state.particle_topg,
-                    state.particle_thk,
-                    state.particle_w,
-                    state.particle_srcid
-                ],
-                axis=0,
-            )
-        )
-        np.savetxt(f, array, delimiter=",", fmt="%.2f", header="Id,x,y,z,rh,t,englt,topg,thk,w,srcid")
+        vars_to_stack = [ID]
+        for var in params.wpar_vars_to_save:
+            if var == "particle_x":
+                vars_to_stack.append(
+                    getattr(state, var).numpy().astype(np.float64) + state.x[0].numpy().astype(np.float64),
+                )
+            elif var == "particle_y":
+                vars_to_stack.append(
+                    getattr(state, var).numpy().astype(np.float64) + state.y[0].numpy().astype(np.float64),
+                )
+            else:
+                vars_to_stack.append(getattr(state, var))
+
+        array = tf.transpose(tf.stack(vars_to_stack, axis=0))
+        np.savetxt(f, array, delimiter=",", fmt="%.2f", header="ID," + ",".join(params.wpar_vars_to_save))
 
         ft = os.path.join("trajectories", "time.dat")
         with open(ft, "a") as f:
@@ -95,4 +112,18 @@ def update(params, state):
 
 
 def finalize(params, state):
-    pass
+    if params.wpar_toggle_particles:
+        # Save particle properties to a CSV file (that will not be deleted when the next run starts)
+        filename = "particles_" + params.wncd_output_file.replace(".nc", ".csv")
+        ID = tf.cast(tf.range(state.particle_x.shape[0]), dtype="float32")
+        vars_to_stack = [ID]
+        for var in params.wpar_vars_to_save:
+            if var in ["particle_x", "particle_y"]:
+                vars_to_stack.append(
+                    getattr(state, var).numpy().astype(np.float64) + getattr(state, var[0]).numpy().astype(np.float64)
+                )
+            else:
+                vars_to_stack.append(getattr(state, var))
+
+        array = tf.transpose(tf.stack(vars_to_stack, axis=0))
+        np.savetxt(filename, array, delimiter=",", fmt="%.2f", header="ID," + ",".join(params.wpar_vars_to_save))

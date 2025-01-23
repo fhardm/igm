@@ -18,10 +18,12 @@ Next, the parameter `--part_density_seeding`, defined by the user in an array (t
 
 The option `--part_initial_rockfall`, if set to `True`, relocates seeding locations to a lower slope (lower than `--part_seed_slope`), where a rockfall would deposit on the glacier more realistically. The particles are iteratively moved in aspect direction until they reach a position below slope threshold. This is repeated at every seeding timestep to account for changes in the glaciated surface. The parameter `--part_max_runout` defines a maximum additional distance the particle will travel after reaching a slope < `--part_seed_slope`. Particles will be uniformly (randomly) distributed between 1 and 1 + `--part_max_runout` times the initial rockfall distance.
 
-## Particle tracking
+## Particle tracking and off-glacier particle options
 
 Adapted from the `particles` module. The default tracking method is `'3d'`.
 The boolean `--part_remove_immobile_particles` gives the user the option to remove immobile off-glacier particles to reduce computation time.
+
+The boolean `--part_moraine_builder` (given `--part_remove_immobile_particles` is `False`) gives the user the option to evaluate off-glacier particles to accumulate moraines as a thickness `state.debthick_offglacier`, based on debris volume within a pixel. This thickness is then added to the bed topography `state.topg`.
 
 
 ## Debris cover and SMB feedback
@@ -55,3 +57,5 @@ where $a$ is the debris-covered mass balance, $\tilde{a}$ is the debris-free mas
 ||`--part_tracking_method`|`'3d'`|Method for tracking particles (simple or 3d)|
 ||`--part_remove_immobile_particles`|`False`|Option to remove immobile off-glacier particles|
 ||`--smb_oestrem_D0`|`0.065`|Characteristic debris thickness (m) in Oestrem curve calculation|
+
+Code written by F. Hardmeier. Partially adapted from the particles module, which was originally written by G. Jouvet, improved and tested by C.-M. Stucki.
