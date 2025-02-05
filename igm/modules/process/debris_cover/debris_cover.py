@@ -139,20 +139,20 @@ def initialize_seeding(params, state):
     state.pswvelbase = tf.Variable(tf.zeros_like(state.thk),trainable=False)
     state.pswvelsurf = tf.Variable(tf.zeros_like(state.thk),trainable=False)
         
+    dzdx , dzdy = compute_gradient_tf(state.usurf,state.dx,state.dx)
+    state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+    # initialize d_in array
+    if params.part_density_seeding != []:
+        state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
+    
     # Grid seeding based on conditions, written by Andreas H., adapted by Florian H.
     # Seeds particles randomly within a grid cell that fulfills the conditions
     # Currently only seeding based on slope implemented, but can be extended to other conditions
+    # compute the gradient of the ice surface
+    
     if params.part_seeding_type == "conditions":
         state.gridseed = np.ones_like(state.thk, dtype=bool)
-              
-        # compute the gradient of the ice surface
-        dzdx , dzdy = compute_gradient_tf(state.usurf,state.dx,state.dx)
-        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
-        
-        # initialize d_in array
-        if params.part_density_seeding != []:
-            state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
-        
+
         # seed where gridseed is True and the slope is steep
         state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope/180*np.pi)
         
@@ -189,10 +189,6 @@ def initialize_seeding(params, state):
         # Reshape
         mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
         srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
-
-        # Initialize d_in array
-        if params.part_density_seeding != []:
-            state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
         
         # Define debrismask and srcid
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
@@ -500,29 +496,24 @@ def deb_seeding_particles(params, state):
         
     state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
     
-    # Randomized seeding based on high-res slope threshold
-    if params.part_seeding_type == "slope_shp":
-        # Determine where to seed particles based on the probability (gridseed_fraction)
-        seeding_mask = np.random.rand(*state.gridseed_fraction.shape) < state.gridseed_fraction
-        # Apply the seeding mask to the gridseed
-        state.gridseed = tf.cast(seeding_mask, dtype=tf.bool)
-    elif params.part_seeding_type == "conditions" or params.part_seeding_type == "both":
-        # Compute the gradient of the current land/ice surface
-        dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
-        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
-        state.aspect_rad = -tf.atan2(dzdx, -dzdy)
-        
+    
+    # Compute the gradient of the current land/ice surface
+    dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
+    state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+    state.aspect_rad = -tf.atan2(dzdx, -dzdy)
+    
+    if params.part_seeding_type == "conditions" or params.part_seeding_type == "both":    
         # apply the gradient condition on gridseed
         state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope / 180 * np.pi)
     
     # Seeding
     I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
-    state.nparticle_x  = state.X[I] - state.x[0]            # x position of the particle
-    state.nparticle_y  = state.Y[I] - state.y[0]            # y position of the particle
-    state.nparticle_z  = state.usurf[I]                     # z position of the particle
+    state.nparticle_x = state.X[I] - state.x[0]            # x position of the particle
+    state.nparticle_y = state.Y[I] - state.y[0]            # y position of the particle
+    state.nparticle_z = state.usurf[I]                     # z position of the particle
     state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
-    state.nparticle_w  = tf.ones_like(state.X[I]) * state.volume_per_particle   # weight of the particle
-    state.nparticle_t  = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
+    state.nparticle_w = tf.ones_like(state.X[I]) * state.volume_per_particle   # weight of the particle
+    state.nparticle_t = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
     state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
     state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
     state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
@@ -531,6 +522,8 @@ def deb_seeding_particles(params, state):
     if params.part_initial_rockfall:
         state = deb_initial_rockfall(params, state)
     
+    if params.part_seeding_type == "slope_shp":
+        state.nparticle_w = state.nparticle_w * state.gridseed_fraction[I] # adjust the weight of the particle based on the fraction of the grid cell area inside the polygons
 
 def deb_initial_rockfall(params, state):
     """
@@ -616,13 +609,6 @@ def deb_initial_rockfall(params, state):
         indexing="ij",
     )[0, :, 0]
     
-    # Save initial positions as state variables
-    if not hasattr(state, 'particle_initx'):
-        state.particle_initx = []
-    if not hasattr(state, 'particle_inity'):
-        state.particle_inity = []
-    state.particle_initx = tf.concat([state.particle_initx, initx], axis=-1)
-    state.particle_inity = tf.concat([state.particle_inity, inity], axis=-1)
     return state
     
     
@@ -669,7 +655,7 @@ def deb_count_particles_in_grid(state):
     
 
     # Initialize a 2D array to hold the counts
-    counts = np.zeros_like(state.usurf, dtype=int)
+    counts = np.zeros_like(state.usurf, dtype=np.float32)
     
     # Count particles in each grid cell and add their assigned volume
     for x, y, w in zip(grid_particle_x, grid_particle_y, state.particle_w[mask]):

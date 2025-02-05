@@ -108,6 +108,20 @@ def update(params, state):
                     s=0.5,
                     cmap="RdBu",
                 )
+            else:
+                if hasattr(state, "ip"):
+                    state.ip.set_visible(False)
+                r = 1
+                state.ip = state.ax.scatter(
+                    x = state.particle_x[::r] + state.x[0],
+                    y = state.particle_y[::r] + state.y[0],
+                    c = state.particle_r[::r].numpy(),
+                    vmin=0,
+                    vmax=1,
+                    s=0.5,
+                    cmap="RdBu",
+                )
+                    
         state.ax.set_title("YEAR : " + str(state.t.numpy()), size=15)
 
         if not hasattr(state, "already_set_cbar"):
