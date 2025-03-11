@@ -45,9 +45,15 @@ def initialize(params, state):
     state.tcomp_write_particles = []
 
     directory = "trajectories"
-    if os.path.exists(directory):
-        shutil.rmtree(directory)
-    os.mkdir(directory)
+    if not os.path.exists(directory):
+        os.mkdir(directory)
+    else:
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
 
     os.system( "echo rm -r " + "trajectories" + " >> clean.sh" )
 
@@ -70,8 +76,7 @@ def update(params, state):
             "traj-" + "{:06d}".format(int(state.t.numpy())) + ".csv",
         )
 
-        ID = tf.cast(tf.range(state.particle_x.shape[0]), dtype="float32")
-        vars_to_stack = [ID]
+        vars_to_stack = []
         for var in params.wpar_vars_to_save:
             if var == "particle_x":
                 vars_to_stack.append(
@@ -85,7 +90,7 @@ def update(params, state):
                 vars_to_stack.append(getattr(state, var))
 
         array = tf.transpose(tf.stack(vars_to_stack, axis=0))
-        np.savetxt(f, array, delimiter=",", fmt="%.2f", header="ID," + ",".join(params.wpar_vars_to_save))
+        np.savetxt(f, array, delimiter=",", fmt="%.2f", header=",".join(params.wpar_vars_to_save))
 
         ft = os.path.join("trajectories", "time.dat")
         with open(ft, "a") as f:
@@ -115,15 +120,18 @@ def finalize(params, state):
     if params.wpar_toggle_particles:
         # Save particle properties to a CSV file (that will not be deleted when the next run starts)
         filename = "particles_" + params.wncd_output_file.replace(".nc", ".csv")
-        ID = tf.cast(tf.range(state.particle_x.shape[0]), dtype="float32")
-        vars_to_stack = [ID]
+        vars_to_stack = []
         for var in params.wpar_vars_to_save:
-            if var in ["particle_x", "particle_y"]:
+            if var == "particle_x":
                 vars_to_stack.append(
-                    getattr(state, var).numpy().astype(np.float64) + getattr(state, var[0]).numpy().astype(np.float64)
+                    getattr(state, var).numpy().astype(np.float64) + state.x[0].numpy().astype(np.float64),
+                )
+            elif var == "particle_y":
+                vars_to_stack.append(
+                    getattr(state, var).numpy().astype(np.float64) + state.y[0].numpy().astype(np.float64),
                 )
             else:
                 vars_to_stack.append(getattr(state, var))
 
         array = tf.transpose(tf.stack(vars_to_stack, axis=0))
-        np.savetxt(filename, array, delimiter=",", fmt="%.2f", header="ID," + ",".join(params.wpar_vars_to_save))
+        np.savetxt(filename, array, delimiter=",", fmt="%.2f", header=",".join(params.wpar_vars_to_save))

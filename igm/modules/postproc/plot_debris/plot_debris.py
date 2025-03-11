@@ -51,7 +51,18 @@ def initialize(params, state):
 
     if params.pltdeb_editor == "vs":
         plt.ion()  # enable interactive mode
-
+    
+    directory = "particle_vis"
+    if not os.path.exists(directory):
+        os.mkdir(directory)
+    else:
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+                
     state.tcomp_plot2d = []
 
     state.fig = plt.figure(dpi=200)
@@ -59,7 +70,7 @@ def initialize(params, state):
     state.ax.axis("off")
     state.ax.set_aspect("equal")
 
-    os.system("echo rm " + params.pltdeb_var + "*.png" + " >> clean.sh")
+    os.system("echo rm " + "particle_vis" + "*.png" + " >> clean.sh")
 
 
 def update(params, state):
@@ -139,7 +150,7 @@ def update(params, state):
                 display(state.fig)
         else:
             plt.savefig(
-                params.pltdeb_var + "-" + str(state.t.numpy()).zfill(4) + ".png",
+                os.path.join("particle_vis", params.pltdeb_var + "-" + str(state.t.numpy()).zfill(4) + ".png"),
                 bbox_inches="tight",
                 pad_inches=0.2,
             )
