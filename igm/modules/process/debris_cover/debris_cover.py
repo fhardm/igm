@@ -301,7 +301,6 @@ def deb_particles(params, state):
         state.particle_srcid = tf.Variable(tf.concat([state.particle_srcid, state.nparticle_srcid], axis=-1),trainable=False)
 
         state.tlast_seeding = state.t.numpy()
-        print("------ Seeding marker at time:", state.t.numpy())
 
     if (state.particle_x.shape[0]>0)&(state.it >= 0):
         state.tcomp_particles.append(time.time())
@@ -408,7 +407,7 @@ def deb_particles(params, state):
             state.particle_r = tf.where(thk== 0, tf.ones_like(state.particle_r), state.particle_r)
         
         else:
-            print("Error : Name of the particles tracking method not recognised")
+            print("Error: Name of the particles tracking method not recognised")
 
         # make sur the particle remains in the horiz. comp. domain
         state.particle_x = tf.clip_by_value(state.particle_x, 0, state.x[-1] - state.x[0])
@@ -444,7 +443,6 @@ def deb_particles(params, state):
         if params.part_aggregate_immobile_particles and (state.t.numpy() - state.tlast_seeding) == 0:
             J = (state.particle_thk > 1)
             immobile_particles = tf.logical_not(J)
-            print("Number of immobile particles:", tf.reduce_sum(tf.cast(immobile_particles, tf.int32)).numpy())
             
             immobile_x = tf.boolean_mask(state.particle_x, immobile_particles)
             immobile_y = tf.boolean_mask(state.particle_y, immobile_particles)
@@ -600,7 +598,7 @@ def deb_seeding_particles(params, state):
     if params.part_initial_rockfall:
         state = deb_initial_rockfall(params, state)
     
-    if params.part_seeding_type == "slope_shp":
+    if params.part_seeding_type == "slope_highres":
         state.nparticle_w = state.nparticle_w * state.gridseed_fraction[I] # adjust the weight of the particle based on the fraction of the grid cell area inside the polygons
 
 def deb_initial_rockfall(params, state):
