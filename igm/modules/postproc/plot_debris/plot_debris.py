@@ -44,7 +44,24 @@ def params(parser):
         default=1000,
         help="Maximum value of the varplot variable used to adjust the scaling of the colorbar",
     )
-
+    parser.add_argument(
+        "--pltdeb_part_var",
+        type=str,
+        default="particle_r",
+        help="particle property to plot",
+    )
+    parser.add_argument(
+        "--pltdeb_part_var_min",
+        type=float,
+        default=0,
+        help="Maximum value of the varplot variable used to adjust the scaling of the colorbar (particle property)",
+    )
+    parser.add_argument(
+        "--pltdeb_part_var_max",
+        type=float,
+        default=1,
+        help="Maximum value of the varplot variable used to adjust the scaling of the colorbar (particle property)",
+    )
 
 def initialize(params, state):
     state.extent = [np.min(state.x), np.max(state.x), np.min(state.y), np.max(state.y)]
@@ -126,9 +143,9 @@ def update(params, state):
                 state.ip = state.ax.scatter(
                     x = state.particle_x[::r] + state.x[0],
                     y = state.particle_y[::r] + state.y[0],
-                    c = state.particle_r[::r].numpy(),
-                    vmin=0,
-                    vmax=1,
+                    c = vars(state)[params.pltdeb_part_var][::r].numpy(),
+                    vmin=params.pltdeb_part_var_min,
+                    vmax=params.pltdeb_part_var_max,
                     s=0.5,
                     cmap="RdBu",
                 )
