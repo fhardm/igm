@@ -72,6 +72,7 @@ Any property can be assigned to particles when seeded, tracked, and/or evaluated
 ||`--logging`||Activate the looging|
 ||`--logging_file`|``|Logging file name, if empty it prints in the screen|
 ||`--print_params`||Print definitive parameters in a file for record|
+||`--part_seeding_delay`|`0`|Optional delay in years before seeding starts at the beginning of the simulation|
 ||`--part_seeding_type`|`'conditions'`|Seeding type (`'conditions'`, `'shapefile'`, or `'both'`). `'conditions'` seeds particles based on conditions (e.g. slope, thickness, velocity), `'shapefile'` seeds particles in area defined by a shapefile, `'both'` applies conditions and shapefile|
 ||`--part_debrismask_shapefile`|`'debrismask.shp'`|Debris mask input file (shapefile)|
 ||`--part_frequency_seeding`|`10`|Debris input frequency in years (default: 10), should not go below `--time_save`|
@@ -85,4 +86,4 @@ Any property can be assigned to particles when seeded, tracked, and/or evaluated
 ||`--part_moraine_builder`|`False`|Build a moraine using off-glacier immobile particles|
 ||`--smb_oestrem_D0`|`0.065`|Characteristic debris thickness (m) in Oestrem curve calculation|
 
-Code written by F. Hardmeier. Partially adapted from the particles module, which was originally written by G. Jouvet, improved and tested by C.-M. Stucki.
+Code written by F. Hardmeier. Partially adapted from the particles module, which was originally written by G. Jouvet and C.-M. Stucki.

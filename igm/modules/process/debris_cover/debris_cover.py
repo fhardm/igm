@@ -36,6 +36,12 @@ def params(parser):
         help="Debris mask input file (default: debrismask.shp)",
     )
     parser.add_argument(
+        "--part_seeding_delay",
+        type=int,
+        default=0,
+        help="Optional delay in years before seeding starts at the beginning of the simulation (default: 0 years)",
+    )
+    parser.add_argument(
         "--part_frequency_seeding",
         type=int,
         default=10,
@@ -284,7 +290,7 @@ def deb_particles(params, state):
     if hasattr(state, "logger"):
         state.logger.info("Update particle tracking at time : " + str(state.t.numpy()))
         
-    if (state.t.numpy() - state.tlast_seeding) >= params.part_frequency_seeding:
+    if (state.t.numpy() - state.tlast_seeding) >= params.part_frequency_seeding and state.t.numpy() >= params.time_start + params.part_seeding_delay:
         deb_seeding_particles(params, state)
         
         # merge the new seeding points with the former ones
@@ -567,6 +573,8 @@ def deb_seeding_particles(params, state):
     
     if params.part_slope_correction:
          state.volume_per_particle = state.volume_per_particle / tf.cos(state.slope_rad)
+    else:
+         state.volume_per_particle = state.volume_per_particle * tf.ones_like(state.slope_rad)
     
     # Compute the gradient of the current land/ice surface
     dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
