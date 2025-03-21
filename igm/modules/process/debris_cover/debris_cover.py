@@ -111,17 +111,21 @@ def initialize(params, state):
     # initialize the seeding
     state = initialize_seeding(params, state)
     
-    # initialize the debris thickness (on- and off-glacier) and debris concentration
+    # initialize the debris thickness (on- and off-glacier) and debris concentration (depth-integrated and vertically resolved)
     state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debthick_offglacier = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debcon = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    state.debcon_vert = tf.Variable(tf.zeros((params.iflo_Nz,) + state.usurf.shape, dtype=tf.float32))
+    state.debflux_engl = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    state.debflux_supragl = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    state.debflux = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     
 def update(params, state):
     # update the particle tracking by calling the particles function, adapted from module particles.py
     state = deb_particles(params, state)
     
     # update debris thickness based on particle count in grid cells (at every SMB update time step)
-    state = deb_thickness(state)
+    state = deb_thickness(params, state)
         
     # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
     state = deb_smb(params, state)
@@ -694,7 +698,7 @@ def deb_initial_rockfall(params, state):
     return state
     
     
-def deb_thickness(state):
+def deb_thickness(params, state):
     """
     Calculates debris thickness based on particle volumes counted per pixel.
     
@@ -708,9 +712,13 @@ def deb_thickness(state):
     """
     
     if (state.t.numpy() - state.tlast_mb) == 0:
-        surf_w_sum,engl_w_sum = deb_count_particles(state) # count particles and their volumes in grid cells
-        state.debthick.assign(surf_w_sum / state.dx**2) # convert to m thickness by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area)
-        state.debcon.assign(engl_w_sum / (state.dx**2 * state.thk)) # convert to m depth-averaged volumetric debris concentration by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area) and ice thickness thk
+        engl_w_sum = deb_count_particles(params, state) # count particles and their volumes in grid cells
+        state.debthick.assign(engl_w_sum[-1, :, :] / state.dx**2) # convert to m thickness by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area)
+        state.debcon.assign(tf.reduce_sum(engl_w_sum[:-1, :, :], axis=0) / (state.dx**2 * state.thk)) # convert to m depth-averaged volumetric debris concentration by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area) and ice thickness thk
+        state.debcon_vert.assign(tf.where(state.thk[None,:,:] > 0, engl_w_sum[:-1, :, :] / (state.dx**2 * state.thk[None,:,:]) * params.iflo_Nz, 0.0)) # vertically resolved debris concentration
+        state.debflux_supragl.assign(state.debthick * getmag(state.uvelsurf,state.vvelsurf)) # debris flux (supraglacial)
+        state.debflux_engl.assign(tf.reduce_sum(engl_w_sum[:-1, :, :] * tf.sqrt(state.U**2 + state.V**2), axis=0) / state.dx**2) # debris flux (englacial)
+        state.debflux.assign(state.debflux_supragl + state.debflux_engl) # debris flux (englacial and supraglacial)
         mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
         state.debthick.assign(tf.where(mask, 0.0, state.debthick))
         mask = state.thk == 0 # mask out off-glacier areas and accumulation area
@@ -718,7 +726,7 @@ def deb_thickness(state):
     return state
 
 # Count surface particles in grid cells
-def deb_count_particles(state):
+def deb_count_particles(params, state):
     """
     Count surface and englacial particles within a grid cell.
 
@@ -729,35 +737,37 @@ def deb_count_particles(state):
     surf_w_sum: A 2D array with the sum of particle debris volume (particle_w) of surface particles in each grid cell.
     engl_w_sum: A 2D array with the sum of particle debris volume (particle_w) of englacial particles in each grid cell.
     """
-    # Filter particles where particle_r is 1 (debris on the surface)
-    surf_mask = tf.equal(state.particle_r, 1)
-    filtered_particle_x = tf.boolean_mask(state.particle_x, surf_mask)
-    filtered_particle_y = tf.boolean_mask(state.particle_y, surf_mask)
-    # Convert particle positions to grid indices
     sorted_x = np.sort(state.x)
     sorted_y = np.sort(state.y)
-    grid_particle_y = np.digitize(filtered_particle_x, sorted_x - sorted_x[0]) - 1
-    grid_particle_x = np.digitize(filtered_particle_y, sorted_y - sorted_y[0]) - 1
-    # Initialize a 2D array to hold the counts
-    surf_w_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
-    # Count surface particles in each grid cell and add their assigned volume
-    indices = tf.stack([grid_particle_x, grid_particle_y], axis=1)
-    surf_w_sum = tf.tensor_scatter_nd_add(surf_w_sum, indices, tf.boolean_mask(state.particle_w, surf_mask))
+    grid_particle_y = np.digitize(state.particle_x, sorted_x - sorted_x[0]) - 1
+    grid_particle_x = np.digitize(state.particle_y, sorted_y - sorted_y[0]) - 1
+    # Create depth bins for each pixel
+    depth_bins = tf.linspace(0.0, 1.0, params.iflo_Nz + 1)
     
-    # Count englacial particles in grid cells
-    engl_mask = tf.less(state.particle_r, 1)
-    filtered_particle_x = tf.boolean_mask(state.particle_x, engl_mask)
-    filtered_particle_y = tf.boolean_mask(state.particle_y, engl_mask)
-    # Convert particle positions to grid indices
-    grid_particle_y = tf.cast(tf.floor(filtered_particle_x / state.dx), tf.int32)
-    grid_particle_x = tf.cast(tf.floor(filtered_particle_y / state.dx), tf.int32)
-    # Separately count englacial particles
-    engl_w_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
-    # Count englacial particles in each grid cell and add their assigned volume
-    indices = tf.stack([grid_particle_x, grid_particle_y], axis=1)
-    engl_w_sum = tf.tensor_scatter_nd_add(engl_w_sum, indices, tf.boolean_mask(state.particle_w, engl_mask))
+    # Initialize a 3D array to hold the counts for each depth bin
+    engl_w_sum = tf.zeros((params.iflo_Nz + 1,) + state.usurf.shape, dtype=tf.float32)
     
-    return surf_w_sum, engl_w_sum
+    # Iterate over each depth bin
+    for k in range(params.iflo_Nz + 1):
+        # Create a mask for particles within the current depth bin
+        if depth_bins[k] < depth_bins[-1]:
+            bin_mask = (state.particle_r >= depth_bins[k]) & (state.particle_r < depth_bins[k + 1])
+        else:
+            bin_mask = state.particle_r >= depth_bins[k]
+            
+        # Filter particles within the current depth bin
+        filtered_particle_x = tf.boolean_mask(state.particle_x, bin_mask)
+        filtered_particle_y = tf.boolean_mask(state.particle_y, bin_mask)
+        
+        # Convert particle positions to grid indices
+        grid_particle_y = tf.cast(tf.floor(filtered_particle_x / state.dx), tf.int32)
+        grid_particle_x = tf.cast(tf.floor(filtered_particle_y / state.dx), tf.int32)
+        
+        # Count particles in each grid cell and add their assigned volume
+        indices = tf.stack([grid_particle_x, grid_particle_y], axis=1)
+        engl_w_sum = tf.tensor_scatter_nd_add(engl_w_sum, tf.concat([tf.fill([tf.shape(indices)[0], 1], k), indices], axis=1), tf.boolean_mask(state.particle_w, bin_mask))
+    
+    return engl_w_sum
 
 
 # debris-covered mass balance computation, adapted from smb_simple.py (Guillaume Jouvet)

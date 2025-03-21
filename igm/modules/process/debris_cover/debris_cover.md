@@ -32,7 +32,9 @@ The boolean `--part_moraine_builder` (given `--part_remove_immobile_particles` i
 
 When a particle has a relative position within the ice column `particle_r` of 1, it is detected as surface debris. The assigned debris volumes `particle_w` of all particles within a pixel are summed up and distributed across the pixel as a debris thickness `debthick`.
 
-Similarly, depth-averaged englacial debris concentration is saved to the variable `debcon`.
+Similarly, depth-averaged englacial debris concentration is saved to the variable `debcon`. Vertically resolved debris concentration is saved to `debcon_vert`. The amount of vertical layers is given by the vertical ice flow layers `iflo_Nz`.
+
+Debris flux - defined as the volume of debris moving along the glacier per meter per year - is saved to the variable `debflux`.
 
 Surface mass balance (SMB) is then adjusted according to debris thickness `debthick`. Currently, the module uses a simple Oestrem curve approach, where
 
