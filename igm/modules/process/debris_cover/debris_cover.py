@@ -119,6 +119,7 @@ def initialize(params, state):
     state.debflux_engl = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debflux_supragl = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debflux = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
+    state.thk_deb = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     
 def update(params, state):
     # update the particle tracking by calling the particles function, adapted from module particles.py
@@ -419,10 +420,28 @@ def deb_particles(params, state):
         else:
             print("Error: Name of the particles tracking method not recognised")
 
-        # make sur the particle remains in the horiz. comp. domain
-        state.particle_x = tf.clip_by_value(state.particle_x, 0, state.x[-1] - state.x[0])
-        state.particle_y = tf.clip_by_value(state.particle_y, 0, state.y[-1] - state.y[0])
-
+        # make sure particles remain within the icemask
+        if hasattr(state, "icemask"):
+            mask = tf.cast(
+                tf.gather_nd(
+                state.icemask,
+                tf.stack(
+                    [
+                    tf.cast(state.particle_y / state.dx, tf.int32),
+                    tf.cast(state.particle_x / state.dx, tf.int32),
+                    ],
+                    axis=1,
+                ),
+                ),
+                tf.bool,
+            )
+            state.particle_x = tf.where(mask, state.particle_x, tf.zeros_like(state.particle_x))
+            state.particle_y = tf.where(mask, state.particle_y, tf.zeros_like(state.particle_y))
+        # if there is no icemask, we make sure the particles remain within the grid domain
+        else:
+            state.particle_x = tf.clip_by_value(state.particle_x, 0, state.x[-1] - state.x[0])
+            state.particle_y = tf.clip_by_value(state.particle_y, 0, state.y[-1] - state.y[0])
+        
         indices = tf.concat(
             [
                 tf.expand_dims(tf.cast(j, dtype="int32"), axis=-1),
@@ -465,7 +484,7 @@ def deb_particles(params, state):
             grid_particle_x = tf.cast(tf.floor(immobile_x / state.dx), tf.int32)
             grid_particle_y = tf.cast(tf.floor(immobile_y / state.dx), tf.int32)
             # Combine grid indices into a single tensor
-            grid_indices = tf.stack([grid_particle_x, grid_particle_y], axis=1)
+            grid_indices = tf.stack([grid_particle_y, grid_particle_x], axis=1)
             
             # Initialize tensors to hold the sum of particle_t, particle_englt, and particle_srcid values, and a tensor to hold the counts
             offglacier_w_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
@@ -511,13 +530,22 @@ def deb_particles(params, state):
                 num_new_particles = tf.size(state.X[I]).numpy()
                 state.nID = tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32) # particle ID
                 state.particle_counter += num_new_particles
-                state.nparticle_x = state.X[I] - state.x[0]            # x position of the particle
-                state.nparticle_y = state.Y[I] - state.y[0]            # y position of the particle
-                state.nparticle_z = state.usurf[I]                     # z position of the particle
+                
+                # Calculate weighted average of immobile particle coordinates within each grid cell
+                weighted_x_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_x * immobile_w)
+                weighted_y_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_y * immobile_w)
+                total_weight = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_w)
+                avg_x = tf.math.divide_no_nan(weighted_x_sum, total_weight)
+                avg_y = tf.math.divide_no_nan(weighted_y_sum, total_weight)
+
+                # Use the weighted average coordinates for re-seeding
+                state.nparticle_x = avg_x[I]                            # x position of the particle
+                state.nparticle_y = avg_y[I]                            # y position of the particle
+                state.nparticle_z = state.usurf[I]                      # z position of the particle
                 state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
                 state.nparticle_w = tf.ones_like(state.X[I]) * offglacier_w_sum[I]   # weight of the particle
                 state.nparticle_t = tf.ones_like(state.X[I]) * offglacier_t_mean[I] # "date of birth" of the particle (useful to compute its age)
-                state.nparticle_englt = tf.ones_like(state.X[I]) * offglacier_englt_mean[I] # time spent by the particle burried in the glacier
+                state.nparticle_englt = tf.ones_like(state.X[I]) * offglacier_englt_mean[I] # time spent by the particle buried in the glacier
                 state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
                 state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
                 state.nparticle_srcid = tf.ones_like(state.X[I]) * offglacier_srcid_mean[I] # source area id from debris mask shapefile (if used)
@@ -543,13 +571,12 @@ def deb_particles(params, state):
             state.particle_r = tf.where(state.particle_thk == 0, tf.ones_like(state.particle_r), state.particle_r)
             
             # count particles in grid cells
-            surf_w_sum, _ = deb_count_particles(state)
+            engl_w_sum = deb_count_particles(params, state)
             
             # add the debris thickness of off-glacier particles to the grid cells
-            state.debthick_offglacier.assign(surf_w_sum / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
-
-            # apply off-glacier mask (where particle_thk < 1)
-            mask = state.thk > 1
+            state.debthick_offglacier.assign(tf.reduce_sum(engl_w_sum, axis=0) / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
+            # apply off-glacier mask (where particle_thk < 0)
+            mask = state.thk > 0
             state.debthick_offglacier.assign(tf.where(mask, 0.0, state.debthick_offglacier))
             # add the resulting debris thickness to state.topg
             state.topg = state.topg + state.debthick_offglacier
@@ -719,6 +746,7 @@ def deb_thickness(params, state):
         state.debflux_supragl.assign(state.debthick * getmag(state.uvelsurf,state.vvelsurf)) # debris flux (supraglacial)
         state.debflux_engl.assign(tf.reduce_sum(engl_w_sum[:-1, :, :] * tf.sqrt(state.U**2 + state.V**2), axis=0) / state.dx**2) # debris flux (englacial)
         state.debflux.assign(state.debflux_supragl + state.debflux_engl) # debris flux (englacial and supraglacial)
+        state.thk_deb.assign(state.thk) # ice thickness at the beginning of the time step
         mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
         state.debthick.assign(tf.where(mask, 0.0, state.debthick))
         mask = state.thk == 0 # mask out off-glacier areas and accumulation area
@@ -734,8 +762,7 @@ def deb_count_particles(params, state):
     state (object): An object containing particle coordinates (particle_x, particle_y) and grid cell boundaries (X, Y).
 
     Returns:
-    surf_w_sum: A 2D array with the sum of particle debris volume (particle_w) of surface particles in each grid cell.
-    engl_w_sum: A 2D array with the sum of particle debris volume (particle_w) of englacial particles in each grid cell.
+    engl_w_sum: A 3D array with the sum of particle debris volume (particle_w) of englacial particles in each grid cell, sorted into vertical bins.
     """
     sorted_x = np.sort(state.x)
     sorted_y = np.sort(state.y)
@@ -760,11 +787,11 @@ def deb_count_particles(params, state):
         filtered_particle_y = tf.boolean_mask(state.particle_y, bin_mask)
         
         # Convert particle positions to grid indices
-        grid_particle_y = tf.cast(tf.floor(filtered_particle_x / state.dx), tf.int32)
-        grid_particle_x = tf.cast(tf.floor(filtered_particle_y / state.dx), tf.int32)
+        grid_particle_x = tf.cast(tf.floor(filtered_particle_x / state.dx), tf.int32)
+        grid_particle_y = tf.cast(tf.floor(filtered_particle_y / state.dx), tf.int32)
         
         # Count particles in each grid cell and add their assigned volume
-        indices = tf.stack([grid_particle_x, grid_particle_y], axis=1)
+        indices = tf.stack([grid_particle_y, grid_particle_x], axis=1)
         engl_w_sum = tf.tensor_scatter_nd_add(engl_w_sum, tf.concat([tf.fill([tf.shape(indices)[0], 1], k), indices], axis=1), tf.boolean_mask(state.particle_w, bin_mask))
     
     return engl_w_sum
