@@ -156,6 +156,12 @@ def update(params, state):
                             var, np.dtype("float32").char, ("time", "z", "y", "x")
                         )
                         E[0, :, :, :] = vars(state)[var].numpy()
+                    else:
+                        E = nc.createVariable(
+                            var, np.dtype("float32").char, ("time")
+                        )
+                        E[0] = vars(state)[var].numpy()
+                        
                     if var in state.var_info_ncdf_ex.keys():
                         E.long_name = state.var_info_ncdf_ex[var][0]
                         E.units = state.var_info_ncdf_ex[var][1]
@@ -178,6 +184,8 @@ def update(params, state):
                         nc.variables[var][d, :, :] = vars(state)[var].numpy()
                     elif vars(state)[var].numpy().ndim == 3:
                         nc.variables[var][d, :, :, :] = vars(state)[var].numpy()
+                    else:
+                        nc.variables[var][d] = vars(state)[var].numpy()
 
             nc.close()
 

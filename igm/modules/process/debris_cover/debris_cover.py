@@ -30,7 +30,7 @@ def params(parser):
         help="Seeding type (conditions, shapefile, or both). 'conditions' seeds particles based on conditions (e.g. slope, thickness, velocity), 'shapefile' seeds particles in area defined by a shapefile, 'both' applies conditions and shapefile (default: conditions)",
     )
     parser.add_argument(
-        "--part_debrismask_shapefile",
+        "--part_seeding_area_file",
         type=str,
         default="debrismask.shp",
         help="Debris mask input file (default: debrismask.shp)",
@@ -111,7 +111,24 @@ def initialize(params, state):
     # initialize the seeding
     state = initialize_seeding(params, state)
     
-    # initialize the debris thickness (on- and off-glacier) and debris concentration (depth-integrated and vertically resolved)
+def update(params, state):
+    if state.t.numpy() >= params.time_start + params.part_seeding_delay:
+        # update the particle tracking by calling the particles function, adapted from module particles.py
+        state = deb_particles(params, state)
+        # update debris thickness based on particle count in grid cells (at every SMB update time step)
+        state = deb_thickness(params, state)
+        # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
+        state = deb_smb(params, state)
+
+def finalize(params, state):
+    pass
+
+
+
+def initialize_seeding(params, state):
+    # initialize the debris variables
+    state.particle_attributes = ["ID", "particle_x", "particle_y", "particle_z", "particle_r", "particle_w",
+                 "particle_t", "particle_englt", "particle_thk", "particle_topg", "particle_srcid"]
     state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debthick_offglacier = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debcon = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
@@ -120,40 +137,15 @@ def initialize(params, state):
     state.debflux_supragl = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debflux = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.thk_deb = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
-    
-def update(params, state):
-    # update the particle tracking by calling the particles function, adapted from module particles.py
-    state = deb_particles(params, state)
-    
-    # update debris thickness based on particle count in grid cells (at every SMB update time step)
-    state = deb_thickness(params, state)
-        
-    # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
-    state = deb_smb(params, state)
-
-def finalize(params, state):
-    pass
-
-
-
-def initialize_seeding(params, state):
-    # initialize particle seeding
+    state.seeded_particles = tf.Variable([0], dtype=tf.float32)
+    state.seeded_debris_volume = tf.Variable([0], dtype=tf.float32)
     state.tlast_seeding = -1.0e5000
     state.tcomp_particles = []
     
     # initialize trajectories (if they do not exist already)
     if not hasattr(state, 'particle_x'):
-        state.ID = tf.Variable([])
-        state.particle_x = tf.Variable([])
-        state.particle_y = tf.Variable([])
-        state.particle_z = tf.Variable([])
-        state.particle_r = tf.Variable([])
-        state.particle_w = tf.Variable([])  # debris volume equivalent to the particle
-        state.particle_t = tf.Variable([])
-        state.particle_englt = tf.Variable([])  # englacial time
-        state.particle_topg = tf.Variable([])
-        state.particle_thk = tf.Variable([])
-        state.particle_srcid = tf.Variable([]) # source area id from debris mask shapefile (if used)
+        for attr in state.particle_attributes:
+            setattr(state, attr, tf.Variable([]))
         state.srcid = tf.zeros_like(state.thk, dtype=tf.float32)
     
     state.pswvelbase = tf.Variable(tf.zeros_like(state.thk),trainable=False)
@@ -166,10 +158,6 @@ def initialize_seeding(params, state):
         state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
     
     # Grid seeding based on conditions, written by Andreas H., adapted by Florian H.
-    # Seeds particles randomly within a grid cell that fulfills the conditions
-    # Currently only seeding based on slope implemented, but can be extended to other conditions
-    # compute the gradient of the ice surface
-    
     if params.part_seeding_type == "conditions":
         state.gridseed = np.ones_like(state.thk, dtype=bool)
 
@@ -179,36 +167,10 @@ def initialize_seeding(params, state):
     # Seeding based on shapefile, adapted from include_icemask (Andreas Henz)  
     elif params.part_seeding_type == "shapefile":
         # read_shapefile
-        gdf = read_shapefile(params.part_debrismask_shapefile)
+        gdf = read_shapefile(params.part_seeding_area_file)
 
-        # Flatten the X and Y coordinates and convert to numpy
-        flat_X = state.X.numpy().flatten()
-        flat_Y = state.Y.numpy().flatten()
-
-        # Create lists to store the mask values and source IDs
-        mask_values = []
-        srcid_values = []
-
-        # Iterate over each grid point
-        for x, y in zip(flat_X, flat_Y):
-            point = Point(x, y)
-            inside_polygon = False
-            srcid = -1  # Default value if point is not inside any polygon
-
-            # Check if the point is inside any polygon in the GeoDataFrame
-            for idx, geom in enumerate(gdf.geometry):
-                if point.within(geom):
-                    inside_polygon = True
-                    srcid = gdf.iloc[idx]['FID']  # Get the FID of the polygon
-                    break  # if it is inside one polygon, don't check for others
-
-            # Append the corresponding mask value and source ID to the lists
-            mask_values.append(1 if inside_polygon else 0)  # 1 for debris input area, 0 for no debris
-            srcid_values.append(srcid)
-
-        # Reshape
-        mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
-        srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
+        # Create a mask and source ID grid from shapefiles
+        mask_values, srcid_values = compute_mask_and_srcid(state, gdf)
         
         # Define debrismask and srcid
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
@@ -221,36 +183,10 @@ def initialize_seeding(params, state):
         
     elif params.part_seeding_type == "both":
         # read_shapefile
-        gdf = read_shapefile(params.part_debrismask_shapefile)
+        gdf = read_shapefile(params.part_seeding_area_file)
 
-        # Flatten the X and Y coordinates and convert to numpy
-        flat_X = state.X.numpy().flatten()
-        flat_Y = state.Y.numpy().flatten()
-
-        # Create a list to store the mask values
-        mask_values = []
-        srcid_values = []
-        
-        # Iterate over each grid point
-        for x, y in zip(flat_X, flat_Y):
-            point = Point(x, y)
-            inside_polygon = False
-            srcid = -1  # Default value if point is not inside any polygon
-
-            # Check if the point is inside any polygon in the GeoDataFrame
-            for idx, geom in enumerate(gdf.geometry):
-                if point.within(geom):
-                    inside_polygon = True
-                    srcid = gdf.iloc[idx]['FID']  # Get the FID of the polygon
-                    break  # if it is inside one polygon, don't check for others
-
-            # Append the corresponding mask value and source ID to the lists
-            mask_values.append(1 if inside_polygon else 0)  # 1 for debris input area, 0 for no debris
-            srcid_values.append(srcid)
-
-        # Reshape
-        mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
-        srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
+        # Create a mask and source ID grid from shapefiles
+        mask_values, srcid_values = compute_mask_and_srcid(state, gdf)
 
         # define debrismask and srcid
         state.gridseed = tf.constant(mask_values, dtype=tf.bool)
@@ -273,7 +209,7 @@ def initialize_seeding(params, state):
         
     elif params.part_seeding_type == "slope_highres":
         # Read the tif file
-        with rasterio.open(params.part_debrismask_shapefile) as src:
+        with rasterio.open(params.part_seeding_area_file) as src:
             print("Data type of src:", type(src))
             # Read the debris mask and reproject it to match the grid of X, Y
             debris_mask = src.read(1, out_shape=(state.X.shape[0], state.X.shape[1]), resampling=rasterio.enums.Resampling.average)
@@ -286,7 +222,15 @@ def initialize_seeding(params, state):
         # Convert the debris mask to a TensorFlow constant
         state.gridseed_fraction = tf.constant(debris_mask, dtype=tf.float32)
         state.gridseed = tf.cast(state.gridseed_fraction > 0, dtype=tf.bool)
-        
+    
+    elif params.part_seeding_type == "csv_points":
+        # Read seeding points from the CSV file
+        x, y = read_seeding_points_from_csv(params.part_seeding_area_file)
+
+        # Assign the imported x and y coordinates to nparticle_x and nparticle_y
+        state.seeding_x = x
+        state.seeding_y = y
+    
     return state
 
 
@@ -295,21 +239,12 @@ def deb_particles(params, state):
     if hasattr(state, "logger"):
         state.logger.info("Update particle tracking at time : " + str(state.t.numpy()))
         
-    if (state.t.numpy() - state.tlast_seeding) >= params.part_frequency_seeding and state.t.numpy() >= params.time_start + params.part_seeding_delay:
+    if (state.t.numpy() - state.tlast_seeding) >= params.part_frequency_seeding:
         deb_seeding_particles(params, state)
         
         # merge the new seeding points with the former ones
-        state.ID = tf.Variable(tf.concat([state.ID, state.nID], axis=-1),trainable=False)
-        state.particle_x = tf.Variable(tf.concat([state.particle_x, state.nparticle_x], axis=-1),trainable=False)
-        state.particle_y = tf.Variable(tf.concat([state.particle_y, state.nparticle_y], axis=-1),trainable=False)
-        state.particle_z = tf.Variable(tf.concat([state.particle_z, state.nparticle_z], axis=-1),trainable=False)
-        state.particle_r = tf.Variable(tf.concat([state.particle_r, state.nparticle_r], axis=-1),trainable=False)
-        state.particle_w = tf.Variable(tf.concat([state.particle_w, state.nparticle_w], axis=-1),trainable=False)   
-        state.particle_t = tf.Variable(tf.concat([state.particle_t, state.nparticle_t], axis=-1),trainable=False)
-        state.particle_englt = tf.Variable(tf.concat([state.particle_englt, state.nparticle_englt], axis=-1),trainable=False)
-        state.particle_topg = tf.Variable(tf.concat([state.particle_topg, state.nparticle_topg], axis=-1),trainable=False)
-        state.particle_thk = tf.Variable(tf.concat([state.particle_thk, state.nparticle_thk], axis=-1),trainable=False)
-        state.particle_srcid = tf.Variable(tf.concat([state.particle_srcid, state.nparticle_srcid], axis=-1),trainable=False)
+        for attr in state.particle_attributes:
+            setattr(state, attr, tf.concat([getattr(state, attr), getattr(state, f"n{attr}")], axis=-1))
 
         state.tlast_seeding = state.t.numpy()
 
@@ -360,9 +295,6 @@ def deb_particles(params, state):
             indices,
             indexing="ij",
         )[0, :, 0]
-
-        
-
 
         zeta = _rhs_to_zeta(params, state.particle_r)  # get the position in the column
         I0 = tf.cast(tf.math.floor(zeta * (params.iflo_Nz - 1)), dtype="int32")
@@ -470,98 +402,7 @@ def deb_particles(params, state):
         
         # aggregate immobile particles in the off-glacier area
         if params.part_aggregate_immobile_particles and (state.t.numpy() - state.tlast_seeding) == 0:
-            J = (state.particle_thk > 1)
-            immobile_particles = tf.logical_not(J)
-            
-            immobile_x = tf.boolean_mask(state.particle_x, immobile_particles)
-            immobile_y = tf.boolean_mask(state.particle_y, immobile_particles)
-            immobile_w = tf.boolean_mask(state.particle_w, immobile_particles)
-            immobile_t = tf.boolean_mask(state.particle_t, immobile_particles)
-            immobile_englt = tf.boolean_mask(state.particle_englt, immobile_particles)
-            immobile_srcid = tf.boolean_mask(state.particle_srcid, immobile_particles)
-                        
-            # Find unique grid cells containing immobile particles
-            grid_particle_x = tf.cast(tf.floor(immobile_x / state.dx), tf.int32)
-            grid_particle_y = tf.cast(tf.floor(immobile_y / state.dx), tf.int32)
-            # Combine grid indices into a single tensor
-            grid_indices = tf.stack([grid_particle_y, grid_particle_x], axis=1)
-            
-            # Initialize tensors to hold the sum of particle_t, particle_englt, and particle_srcid values, and a tensor to hold the counts
-            offglacier_w_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
-            offglacier_t_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
-            offglacier_englt_sum = tf.zeros_like(state.usurf, dtype=tf.float32)
-            sum_particle_srcid = tf.zeros_like(state.usurf, dtype=tf.float32)
-            count_particles = tf.zeros_like(state.usurf, dtype=tf.float32)
-            
-            # Sum particle_t, particle_englt, and particle_srcid values in each grid cell
-            offglacier_w_sum = tf.tensor_scatter_nd_add(offglacier_w_sum, grid_indices, immobile_w)
-            offglacier_t_sum = tf.tensor_scatter_nd_add(offglacier_t_sum, grid_indices, immobile_t)
-            offglacier_englt_sum = tf.tensor_scatter_nd_add(offglacier_englt_sum, grid_indices, immobile_englt)
-            sum_particle_srcid = tf.tensor_scatter_nd_add(sum_particle_srcid, grid_indices, immobile_srcid)
-            
-            # Count particles in each grid cell
-            count_particles = tf.tensor_scatter_nd_add(count_particles, grid_indices, tf.ones_like(immobile_t, dtype=tf.float32))
-            
-            # Calculate mean particle_t, particle_englt, and particle_srcid for each grid cell
-            offglacier_t_mean = tf.math.divide_no_nan(offglacier_t_sum, count_particles)
-            offglacier_englt_mean = tf.math.divide_no_nan(offglacier_englt_sum, count_particles)
-            offglacier_srcid_mean = tf.math.divide_no_nan(sum_particle_srcid, count_particles)
-
-            # Seed particles at the middle of grid cells where offglacier_w_sum > 0
-            I = offglacier_w_sum > 0
-
-            # Remove immobile particles
-            state.ID = tf.boolean_mask(state.ID, J)
-            state.particle_x = tf.boolean_mask(state.particle_x, J)
-            state.particle_y = tf.boolean_mask(state.particle_y, J)
-            state.particle_z = tf.boolean_mask(state.particle_z, J)
-            state.particle_r = tf.boolean_mask(state.particle_r, J)
-            state.particle_w = tf.boolean_mask(state.particle_w, J)
-            state.particle_t = tf.boolean_mask(state.particle_t, J)
-            state.particle_englt = tf.boolean_mask(state.particle_englt, J)
-            state.particle_thk = tf.boolean_mask(state.particle_thk, J)
-            state.particle_topg = tf.boolean_mask(state.particle_topg, J)
-            state.particle_srcid = tf.boolean_mask(state.particle_srcid, J)
-            
-            # Re-seeding aggregated particles
-            if tf.size(I) > 0:
-                if not hasattr(state, 'particle_counter'):
-                    state.particle_counter = 0
-                num_new_particles = tf.size(state.X[I]).numpy()
-                state.nID = tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32) # particle ID
-                state.particle_counter += num_new_particles
-                
-                # Calculate weighted average of immobile particle coordinates within each grid cell
-                weighted_x_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_x * immobile_w)
-                weighted_y_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_y * immobile_w)
-                total_weight = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf, dtype=tf.float32), grid_indices, immobile_w)
-                avg_x = tf.math.divide_no_nan(weighted_x_sum, total_weight)
-                avg_y = tf.math.divide_no_nan(weighted_y_sum, total_weight)
-
-                # Use the weighted average coordinates for re-seeding
-                state.nparticle_x = avg_x[I]                            # x position of the particle
-                state.nparticle_y = avg_y[I]                            # y position of the particle
-                state.nparticle_z = state.usurf[I]                      # z position of the particle
-                state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
-                state.nparticle_w = tf.ones_like(state.X[I]) * offglacier_w_sum[I]   # weight of the particle
-                state.nparticle_t = tf.ones_like(state.X[I]) * offglacier_t_mean[I] # "date of birth" of the particle (useful to compute its age)
-                state.nparticle_englt = tf.ones_like(state.X[I]) * offglacier_englt_mean[I] # time spent by the particle buried in the glacier
-                state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
-                state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
-                state.nparticle_srcid = tf.ones_like(state.X[I]) * offglacier_srcid_mean[I] # source area id from debris mask shapefile (if used)
-                
-                # Merge the new seeding points with the former ones
-                state.ID = tf.Variable(tf.concat([state.ID, state.nID], axis=-1),trainable=False)
-                state.particle_x = tf.Variable(tf.concat([state.particle_x, state.nparticle_x], axis=-1),trainable=False)
-                state.particle_y = tf.Variable(tf.concat([state.particle_y, state.nparticle_y], axis=-1),trainable=False)
-                state.particle_z = tf.Variable(tf.concat([state.particle_z, state.nparticle_z], axis=-1),trainable=False)
-                state.particle_r = tf.Variable(tf.concat([state.particle_r, state.nparticle_r], axis=-1),trainable=False)
-                state.particle_w = tf.Variable(tf.concat([state.particle_w, state.nparticle_w], axis=-1),trainable=False)   
-                state.particle_t = tf.Variable(tf.concat([state.particle_t, state.nparticle_t], axis=-1),trainable=False)
-                state.particle_englt = tf.Variable(tf.concat([state.particle_englt, state.nparticle_englt], axis=-1),trainable=False)
-                state.particle_topg = tf.Variable(tf.concat([state.particle_topg, state.nparticle_topg], axis=-1),trainable=False)
-                state.particle_thk = tf.Variable(tf.concat([state.particle_thk, state.nparticle_thk], axis=-1),trainable=False)
-                state.particle_srcid = tf.Variable(tf.concat([state.particle_srcid, state.nparticle_srcid], axis=-1),trainable=False)
+            state = aggregate_immobile_particles(state)
             
         if params.part_moraine_builder and (state.t.numpy() - state.tlast_mb) == 0:
             # reset topography to initial state before re-evaluating the off-glacier debris thickness
@@ -571,10 +412,10 @@ def deb_particles(params, state):
             state.particle_r = tf.where(state.particle_thk == 0, tf.ones_like(state.particle_r), state.particle_r)
             
             # count particles in grid cells
-            engl_w_sum = deb_count_particles(params, state)
+            state.engl_w_sum = deb_count_particles(params, state)
             
             # add the debris thickness of off-glacier particles to the grid cells
-            state.debthick_offglacier.assign(tf.reduce_sum(engl_w_sum, axis=0) / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
+            state.debthick_offglacier.assign(tf.reduce_sum(state.engl_w_sum, axis=0) / state.dx**2) # convert to m thickness by multiplying by representative volume (m3 debris per particle) and dividing by dx^2 (m2 grid cell area)
             # apply off-glacier mask (where particle_thk < 0)
             mask = state.thk > 0
             state.debthick_offglacier.assign(tf.where(mask, 0.0, state.debthick_offglacier))
@@ -616,29 +457,76 @@ def deb_seeding_particles(params, state):
         # apply the gradient condition on gridseed
         state.gridseed = state.gridseed & np.array(state.slope_rad > params.part_seed_slope / 180 * np.pi)
     
-    # Seeding
-    I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
-    if not hasattr(state, 'particle_counter'):
-        state.particle_counter = 0
-    num_new_particles = tf.size(state.X[I]).numpy()
-    state.nID = tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32) # particle ID
-    state.particle_counter += num_new_particles
-    state.nparticle_x = state.X[I] - state.x[0]            # x position of the particle
-    state.nparticle_y = state.Y[I] - state.y[0]            # y position of the particle
-    state.nparticle_z = state.usurf[I]                     # z position of the particle
-    state.nparticle_r = tf.ones_like(state.X[I])            # relative position in the ice column
-    state.nparticle_w = tf.ones_like(state.X[I]) * state.volume_per_particle[I]   # weight of the particle
-    state.nparticle_t = tf.ones_like(state.X[I]) * state.t # "date of birth" of the particle (useful to compute its age)
-    state.nparticle_englt = tf.zeros_like(state.X[I])       # time spent by the particle burried in the glacier
-    state.nparticle_thk = state.thk[I]                      # ice thickness at position of the particle
-    state.nparticle_topg = state.topg[I]                    # z position of the bedrock under the particle
-    state.nparticle_srcid = state.srcid[I]                  # source area id from debris mask shapefile (if used)
-    
-    if params.part_initial_rockfall:
-        state = deb_initial_rockfall(params, state)
-    
-    if params.part_seeding_type == "slope_highres":
-        state.nparticle_w = state.nparticle_w * state.gridseed_fraction[I] # adjust the weight of the particle based on the fraction of the grid cell area inside the polygons
+    if params.part_seeding_type == "csv_points":
+        if not hasattr(state, 'particle_counter'):
+            state.particle_counter = 0
+        num_new_particles = tf.size(state.seeding_x).numpy()
+        state.nID = tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32) # particle ID
+        state.particle_counter += num_new_particles
+        state.nparticle_x = state.seeding_x - state.x[0]    # x position of the particle
+        state.nparticle_y = state.seeding_y - state.y[0]    # y position of the particle
+        
+        # Compute particle z positions based on the surface & x, y positions
+        indices = tf.expand_dims(
+            tf.concat(
+                [tf.expand_dims(state.nparticle_y / state.dx, axis=-1), tf.expand_dims(state.nparticle_x / state.dx, axis=-1)], axis=-1
+            ),
+            axis=0,
+        )
+        state.nparticle_z = interpolate_bilinear_tf(
+            tf.expand_dims(tf.expand_dims(state.usurf, axis=0), axis=-1),
+            indices,
+            indexing="ij",
+        )[0, :, 0]
+        
+        state.nparticle_r = tf.ones_like(state.nparticle_x)           # relative position in the ice column
+        # Find the grid cell each particle is in
+        grid_particle_x = tf.cast(tf.floor(state.nparticle_x / state.dx), tf.int32)
+        grid_particle_y = tf.cast(tf.floor(state.nparticle_y / state.dx), tf.int32)
+        # Combine grid indices into a single tensor
+        grid_indices = tf.stack([grid_particle_y, grid_particle_x], axis=1)
+        # Assign w, thk, topg, and srcid values based on the grid cell the particle is in
+        state.nparticle_w = tf.gather_nd(state.volume_per_particle, grid_indices)
+        state.nparticle_t = tf.ones_like(state.nparticle_x) * state.t # "date of birth" of the particle (useful to compute its age)
+        state.nparticle_englt = tf.zeros_like(state.nparticle_x)      # time spent by the particle burried in the glacier
+        state.nparticle_thk = tf.gather_nd(state.thk, grid_indices)
+        state.nparticle_topg = tf.gather_nd(state.topg, grid_indices)
+        state.nparticle_srcid = tf.gather_nd(state.srcid, grid_indices)
+
+    else:
+        # Seeding
+        I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
+        if not hasattr(state, 'particle_counter'):
+            state.particle_counter = 0
+        num_new_particles = tf.size(state.X[I]).numpy()
+        state.particle_counter += num_new_particles
+        attributes_values = {
+            "ID": tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32),
+            "particle_x": state.X[I] - state.x[0],
+            "particle_y": state.Y[I] - state.y[0],
+            "particle_z": state.usurf[I],
+            "particle_r": tf.ones_like(state.X[I]),
+            "particle_w": tf.ones_like(state.X[I]) * state.volume_per_particle[I],
+            "particle_t": tf.ones_like(state.X[I]) * state.t,
+            "particle_englt": tf.zeros_like(state.X[I]),
+            "particle_thk": state.thk[I],
+            "particle_topg": state.topg[I],
+            "particle_srcid": state.srcid[I],
+        }
+
+        for attr in state.particle_attributes:
+            setattr(state, f"n{attr}", attributes_values[attr])
+        
+        # Calculate the amount of seeded particles
+        state.seeded_particles = tf.size(state.nparticle_x)
+        # Calculate the sum of seeded debris volume
+        state.seeded_debris_volume = tf.reduce_sum(state.nparticle_w)
+        
+        if params.part_initial_rockfall:
+            state = deb_initial_rockfall(params, state)
+        
+        if params.part_seeding_type == "slope_highres":
+            state.nparticle_w = state.nparticle_w * state.gridseed_fraction[I] # adjust the weight of the particle based on the fraction of the grid cell area inside the polygons
 
 def deb_initial_rockfall(params, state):
     """
@@ -739,12 +627,13 @@ def deb_thickness(params, state):
     """
     
     if (state.t.numpy() - state.tlast_mb) == 0:
-        engl_w_sum = deb_count_particles(params, state) # count particles and their volumes in grid cells
-        state.debthick.assign(engl_w_sum[-1, :, :] / state.dx**2) # convert to m thickness by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area)
-        state.debcon.assign(tf.reduce_sum(engl_w_sum[:-1, :, :], axis=0) / (state.dx**2 * state.thk)) # convert to m depth-averaged volumetric debris concentration by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area) and ice thickness thk
-        state.debcon_vert.assign(tf.where(state.thk[None,:,:] > 0, engl_w_sum[:-1, :, :] / (state.dx**2 * state.thk[None,:,:]) * params.iflo_Nz, 0.0)) # vertically resolved debris concentration
+        if not params.part_moraine_builder:
+            state.engl_w_sum = deb_count_particles(params, state) # count particles and their volumes in grid cells
+        state.debthick.assign(state.engl_w_sum[-1, :, :] / state.dx**2) # convert to m thickness by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area)
+        state.debcon.assign(tf.reduce_sum(state.engl_w_sum[:-1, :, :], axis=0) / (state.dx**2 * state.thk)) # convert to m depth-averaged volumetric debris concentration by dividing representative volume (m3 debris per particle) by dx^2 (m2 grid cell area) and ice thickness thk
+        state.debcon_vert.assign(tf.where(state.thk[None,:,:] > 0, state.engl_w_sum[:-1, :, :] / (state.dx**2 * state.thk[None,:,:]) * params.iflo_Nz, 0.0)) # vertically resolved debris concentration
         state.debflux_supragl.assign(state.debthick * getmag(state.uvelsurf,state.vvelsurf)) # debris flux (supraglacial)
-        state.debflux_engl.assign(tf.reduce_sum(engl_w_sum[:-1, :, :] * tf.sqrt(state.U**2 + state.V**2), axis=0) / state.dx**2) # debris flux (englacial)
+        state.debflux_engl.assign(tf.reduce_sum(state.engl_w_sum[:-1, :, :] * tf.sqrt(state.U**2 + state.V**2), axis=0) / state.dx**2) # debris flux (englacial)
         state.debflux.assign(state.debflux_supragl + state.debflux_engl) # debris flux (englacial and supraglacial)
         state.thk_deb.assign(state.thk) # ice thickness at the beginning of the time step
         mask = (state.smb > 0) | (state.thk == 0) # mask out off-glacier areas and accumulation area
@@ -845,5 +734,148 @@ def read_shapefile(filepath):
 
         # Return the GeoDataFrame
         return gdf
+    
     except Exception as e:
         print("Error reading shapefile:", e)
+        
+def compute_mask_and_srcid(state, gdf):
+    # Flatten the X and Y coordinates and convert to numpy
+    flat_X = state.X.numpy().flatten()
+    flat_Y = state.Y.numpy().flatten()
+
+    # Create lists to store the mask values and source IDs
+    mask_values = []
+    srcid_values = []
+
+    # Iterate over each grid point
+    for x, y in zip(flat_X, flat_Y):
+        point = Point(x, y)
+        inside_polygon = False
+        srcid = -1  # Default value if point is not inside any polygon
+
+        # Check if the point is inside any polygon in the GeoDataFrame
+        for idx, geom in enumerate(gdf.geometry):
+            if point.within(geom):
+                inside_polygon = True
+                srcid = gdf.iloc[idx]['FID']  # Get the FID of the polygon
+                break  # if it is inside one polygon, don't check for others
+
+        # Append the corresponding mask value and source ID to the lists
+        mask_values.append(1 if inside_polygon else 0)  # 1 for debris input area, 0 for no debris
+        srcid_values.append(srcid)
+
+    # Reshape
+    mask_values = np.array(mask_values, dtype=np.float32).reshape(state.X.shape)
+    srcid_values = np.array(srcid_values, dtype=np.int32).reshape(state.X.shape)
+
+    return mask_values, srcid_values
+
+def read_seeding_points_from_csv(filepath):
+    """
+    Reads seeding points from a CSV file and returns their x and y coordinates as separate tensors.
+
+    Parameters:
+    filepath (str): Path to the CSV file containing seeding points.
+
+    Returns:
+    x, y: Two tensors containing the x and y coordinates of the seeding points.
+    """
+    try:
+        # Read the CSV file into a pandas DataFrame
+        df = pd.read_csv(filepath)
+
+        # Define possible aliases for x and y columns
+        x_aliases = ['x', 'particle_x', 'xcoord', 'xpos']
+        y_aliases = ['y', 'particle_y', 'ycoord', 'ypos']
+
+        # Find the actual x and y columns in the DataFrame
+        x_column = next((col for col in x_aliases if col in df.columns), None)
+        y_column = next((col for col in y_aliases if col in df.columns), None)
+
+        if not x_column or not y_column:
+            raise ValueError("Missing required x or y column in the CSV file. Ensure one of the following aliases is present: "
+                                f"x: {x_aliases}, y: {y_aliases}")
+
+        # Convert the DataFrame columns to tensors
+        x = tf.constant(df[x_column].values, dtype=tf.float32)
+        y = tf.constant(df[y_column].values, dtype=tf.float32)
+
+        # Print information about the loaded seeding points
+        print(f"Loaded {len(df)} seeding points from {filepath} using columns '{x_column}' and '{y_column}'.")
+        return x, y
+    
+    except Exception as e:
+        print(f"Error reading seeding points from CSV: {e}")
+        raise
+
+def aggregate_immobile_particles(state):
+        J = (state.particle_thk > 1)
+        immobile_particles = tf.logical_not(J)
+
+        # Mask immobile particles
+        immobile_data = {
+            "x": tf.boolean_mask(state.particle_x, immobile_particles),
+            "y": tf.boolean_mask(state.particle_y, immobile_particles),
+            "w": tf.boolean_mask(state.particle_w, immobile_particles),
+            "t": tf.boolean_mask(state.particle_t, immobile_particles),
+            "englt": tf.boolean_mask(state.particle_englt, immobile_particles),
+            "srcid": tf.boolean_mask(state.particle_srcid, immobile_particles),
+        }
+
+        # Compute grid indices
+        grid_indices = tf.stack([
+            tf.cast(tf.floor(immobile_data["y"] / state.dx), tf.int32),
+            tf.cast(tf.floor(immobile_data["x"] / state.dx), tf.int32)
+        ], axis=1)
+
+        # Aggregate immobile particle data
+        aggregated_data = {
+            "w_sum": tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["w"]),
+            "t_sum": tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["t"]),
+            "englt_sum": tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["englt"]),
+            "srcid_sum": tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["srcid"]),
+            "count": tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, tf.ones_like(immobile_data["t"])),
+        }
+
+        # Compute means
+        aggregated_data["t_mean"] = tf.math.divide_no_nan(aggregated_data["t_sum"], aggregated_data["count"])
+        aggregated_data["englt_mean"] = tf.math.divide_no_nan(aggregated_data["englt_sum"], aggregated_data["count"])
+        aggregated_data["srcid_mean"] = tf.math.divide_no_nan(aggregated_data["srcid_sum"], aggregated_data["count"])
+
+        # Remove immobile particles
+        for attr in state.particle_attributes:
+            setattr(state, attr, tf.boolean_mask(getattr(state, attr), J))
+
+        # Re-seed aggregated particles
+        I = aggregated_data["w_sum"] > 0
+        if tf.reduce_any(I):
+            if not hasattr(state, 'particle_counter'):
+                state.particle_counter = 0
+            num_new_particles = tf.reduce_sum(tf.cast(I, tf.int32)).numpy()
+            state.nID = tf.range(state.particle_counter, state.particle_counter + num_new_particles, dtype=tf.float32)
+            state.particle_counter += num_new_particles
+
+            # Weighted averages for re-seeding
+            weighted_x_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["x"] * immobile_data["w"])
+            weighted_y_sum = tf.tensor_scatter_nd_add(tf.zeros_like(state.usurf), grid_indices, immobile_data["y"] * immobile_data["w"])
+            total_weight = aggregated_data["w_sum"]
+            avg_x = tf.math.divide_no_nan(weighted_x_sum, total_weight)
+            avg_y = tf.math.divide_no_nan(weighted_y_sum, total_weight)
+
+            # Assign new particle attributes
+            state.nparticle_x = avg_x[I]
+            state.nparticle_y = avg_y[I]
+            state.nparticle_z = state.usurf[I]
+            state.nparticle_r = tf.ones_like(state.nparticle_x)
+            state.nparticle_w = aggregated_data["w_sum"][I]
+            state.nparticle_t = aggregated_data["t_mean"][I]
+            state.nparticle_englt = aggregated_data["englt_mean"][I]
+            state.nparticle_thk = state.thk[I]
+            state.nparticle_topg = state.topg[I]
+            state.nparticle_srcid = aggregated_data["srcid_mean"][I]
+
+            # Merge new particles with existing ones
+            for attr in state.particle_attributes:
+                setattr(state, attr, tf.concat([getattr(state, attr), getattr(state, f"n{attr}")], axis=-1))
+            
+            return state
