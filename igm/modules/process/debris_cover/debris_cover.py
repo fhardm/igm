@@ -196,10 +196,6 @@ def initialize_seeding(params, state):
         if not np.any(state.gridseed):
             raise ValueError("Shapefile not within icemask! Watch out for coordinate system!")
 
-        # compute the gradient of the ice surface
-        dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
-        state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
-
         # initialize d_in array
         if params.part_density_seeding != []:
             state.d_in_array = np.array(params.part_density_seeding[1:]).astype(np.float32)
@@ -442,16 +438,16 @@ def deb_seeding_particles(params, state):
         state.d_in = interp1d_tf(state.d_in_array[:, 0], state.d_in_array[:, 1], state.t)
         
     state.volume_per_particle = params.part_frequency_seeding * state.d_in/1000 * state.dx**2 # Volume per particle in m3
+
+    # Compute the gradient of the current land/ice surface
+    dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
+    state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
+    state.aspect_rad = -tf.atan2(dzdx, -dzdy)
     
     if params.part_slope_correction:
          state.volume_per_particle = state.volume_per_particle / tf.cos(state.slope_rad)
     else:
          state.volume_per_particle = state.volume_per_particle * tf.ones_like(state.slope_rad)
-    
-    # Compute the gradient of the current land/ice surface
-    dzdx, dzdy = compute_gradient_tf(state.usurf, state.dx, state.dx)
-    state.slope_rad = tf.atan(tf.sqrt(dzdx**2 + dzdy**2))
-    state.aspect_rad = -tf.atan2(dzdx, -dzdy)
     
     if params.part_seeding_type == "conditions" or params.part_seeding_type == "both":    
         # apply the gradient condition on gridseed

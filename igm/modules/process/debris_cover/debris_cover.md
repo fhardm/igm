@@ -13,6 +13,9 @@ The module currently supports four options to define the area where particles sh
 - For `'shapefile'`, the user can prepare a `.shp` file containing polygons (e.g. known rockfall source areas), which is then converted to a binary mask.
 - For `'both'`, the two previously explained methods are combined.
 - For `'slope_highres'`, the user can prepare a high-resolution boolean TIFF containing areas above a slope theshold, extracted from a high-resolution DEM (e.g. swissALTI3D 2m for a Swiss glacier) in manual pre-processing. The module then scales assigned debris volume per particle based on the steep area fraction within each seeding pixel.
+- For `'csv_points'`, the user can feed a CSV file containing x and y coordinates (must be in the right projection!) to use as seeding points.
+
+Any file needed either as seeding areas (`'shapefile'`, `'both'`, or `'slope_highres'`) or points (`'csv_points'`) are defined in the parameter `'--part_seeding_area_file'`
 
 Next, the parameter `--part_density_seeding`, defined by the user in an array (to enable variation over time), represents a debris input rate in mm per year per square meter. In the model, it corresponds to a debris volume per particle (dependent on seeding frequency `--part_frequency_seeding` and grid size). This volume is assigned to each particle as a permanent property `particle_w` when it is seeded.
 
@@ -75,8 +78,8 @@ Any property can be assigned to particles when seeded, tracked, and/or evaluated
 ||`--logging_file`|``|Logging file name, if empty it prints in the screen|
 ||`--print_params`||Print definitive parameters in a file for record|
 ||`--part_seeding_delay`|`0`|Optional delay in years before seeding starts at the beginning of the simulation|
-||`--part_seeding_type`|`'conditions'`|Seeding type (`'conditions'`, `'shapefile'`, or `'both'`). `'conditions'` seeds particles based on conditions (e.g. slope, thickness, velocity), `'shapefile'` seeds particles in area defined by a shapefile, `'both'` applies conditions and shapefile|
-||`--part_debrismask_shapefile`|`'debrismask.shp'`|Debris mask input file (shapefile)|
+||`--part_seeding_type`|`'conditions'`|Seeding type (`'conditions'`, `'shapefile'`, `'both'`, or `'csv_points'`). `'conditions'` seeds particles based on conditions (e.g. slope, thickness, velocity), `'shapefile'` seeds particles in area defined by a shapefile, `'both'` applies conditions and shapefile, and `'csv_points'` seeds at fixed user-defined points from a CSV file|
+||`--part_seeding_area_file`|`'debrismask.shp'`|Debris mask input file (shapefile) for shapefile seeding type or CSV file for csv_points type seeding|
 ||`--part_frequency_seeding`|`10`|Debris input frequency in years (default: 10), should not go below `--time_save`|
 ||`--part_density_seeding`|``|Debris input rate (or seeding density) in mm/yr in a given seeding area, user-defined as a list with d_in values by year|
 ||`--part_seed_slope`|`45`|Minimum slope to seed particles (in degrees) for `--part_seeding_type = 'conditions'`|
