@@ -27,13 +27,13 @@ def params(parser):
         "--part_seeding_type",
         type=str,
         default="conditions",
-        help="Seeding type (conditions, shapefile, or both). 'conditions' seeds particles based on conditions (e.g. slope, thickness, velocity), 'shapefile' seeds particles in area defined by a shapefile, 'both' applies conditions and shapefile (default: conditions)",
+        help="Seeding type (conditions, shapefile, both, or slope_highres).",
     )
     parser.add_argument(
         "--part_seeding_area_file",
         type=str,
         default="debrismask.shp",
-        help="Debris mask input file (default: debrismask.shp)",
+        help="Debris mask input file (default: debrismask.shp), can be either a .shp (for seeding type shapefile or both) or .tif (for seeding type slope_highres) file.",
     )
     parser.add_argument(
         "--part_seeding_delay",
@@ -129,6 +129,7 @@ def initialize_seeding(params, state):
     # initialize the debris variables
     state.particle_attributes = ["ID", "particle_x", "particle_y", "particle_z", "particle_r", "particle_w",
                  "particle_t", "particle_englt", "particle_thk", "particle_topg", "particle_srcid"]
+    state.engl_w_sum = tf.Variable(tf.zeros((params.iflo_Nz + 1,) + state.usurf.shape, dtype=tf.float32))
     state.debthick = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debthick_offglacier = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
     state.debcon = tf.Variable(tf.zeros_like(state.usurf, dtype=tf.float32))
@@ -247,6 +248,28 @@ def deb_particles(params, state):
     if (state.particle_x.shape[0]>0)&(state.it >= 0):
         state.tcomp_particles.append(time.time())
         
+        # make sure particles remain within the icemask
+        if hasattr(state, "icemask"):
+            mask = tf.cast(
+                tf.gather_nd(
+                state.icemask,
+                tf.stack(
+                    [
+                    tf.cast(state.particle_y / state.dx, tf.int32),
+                    tf.cast(state.particle_x / state.dx, tf.int32),
+                    ],
+                    axis=1,
+                ),
+                ),
+                tf.bool,
+            )
+            for attr in state.particle_attributes:
+                setattr(state, attr, tf.boolean_mask(getattr(state, attr), mask))
+        # if there is no icemask, we make sure the particles remain within the grid domain
+        else:
+            state.particle_x = tf.clip_by_value(state.particle_x, 0, state.x[-1] - state.x[0])
+            state.particle_y = tf.clip_by_value(state.particle_y, 0, state.y[-1] - state.y[0])
+        
         # find the indices of trajectories
         # these indicies are real values to permit 2D interpolations (particles are not necessary on points of the grid)
         i = (state.particle_x) / state.dx
@@ -347,28 +370,6 @@ def deb_particles(params, state):
         
         else:
             print("Error: Name of the particles tracking method not recognised")
-
-        # make sure particles remain within the icemask
-        if hasattr(state, "icemask"):
-            mask = tf.cast(
-                tf.gather_nd(
-                state.icemask,
-                tf.stack(
-                    [
-                    tf.cast(state.particle_y / state.dx, tf.int32),
-                    tf.cast(state.particle_x / state.dx, tf.int32),
-                    ],
-                    axis=1,
-                ),
-                ),
-                tf.bool,
-            )
-            state.particle_x = tf.where(mask, state.particle_x, tf.zeros_like(state.particle_x))
-            state.particle_y = tf.where(mask, state.particle_y, tf.zeros_like(state.particle_y))
-        # if there is no icemask, we make sure the particles remain within the grid domain
-        else:
-            state.particle_x = tf.clip_by_value(state.particle_x, 0, state.x[-1] - state.x[0])
-            state.particle_y = tf.clip_by_value(state.particle_y, 0, state.y[-1] - state.y[0])
         
         indices = tf.concat(
             [
@@ -491,7 +492,9 @@ def deb_seeding_particles(params, state):
 
     else:
         # Seeding
-        I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
+        # I = (state.thk > 0) & (state.smb > -2) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
+        # I = (state.thk > 0) & state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
+        I = state.gridseed # conditions for seeding area: where thk > 0, smb > -2 and gridseed (defined in initialize) is True
         if not hasattr(state, 'particle_counter'):
             state.particle_counter = 0
         num_new_particles = tf.size(state.X[I]).numpy()
@@ -682,7 +685,7 @@ def deb_count_particles(params, state):
     return engl_w_sum
 
 
-# debris-covered mass balance computation, adapted from smb_simple.py (Guillaume Jouvet)
+# debris-covered mass balance adjustment, uses the state.smb value generated in the user-defined smb module
 def deb_smb(params, state):
     # update debris-SMB whenever SMB is updated (tlast_mb is set to state.t in smb_simple.py)
     if (state.t - state.tlast_mb) == 0:
@@ -691,7 +694,14 @@ def deb_smb(params, state):
         if hasattr(state, "debthick"):
             mask = state.debthick > 0
             state.smb = tf.where(mask, state.smb * params.smb_oestrem_D0 / (params.smb_oestrem_D0 + state.debthick), state.smb)
-        
+            
+            # # Compagno et al. (2021) debris-SMB adjustment including melt enhancement at thin debris thicknesses
+            # h_eff = 0.016
+            # h_crit = 0.036
+            # k_debris = 0.03
+            # mask_eff = tf.logical_and(state.debthick > h_eff, state.debthick > 0)
+            # state.smb = tf.where(mask_eff, state.smb * (k_debris + h_crit)/(state.debthick + k_debris), state.smb)
+            # state.smb = tf.where(~mask_eff, state.smb * ((k_debris + h_crit)/(state.debthick + k_debris) * state.debthick/h_eff + (h_eff - state.debthick)/h_eff), state.smb)
     return state
 
 

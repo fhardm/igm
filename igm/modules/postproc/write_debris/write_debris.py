@@ -89,7 +89,7 @@ def update(params, state):
             else:
                 vars_to_stack.append(getattr(state, var))
 
-        array = tf.transpose(tf.stack(vars_to_stack, axis=0))
+        array = np.transpose(np.stack(vars_to_stack, axis=0))
         np.savetxt(f, array, delimiter=",", fmt="%.2f", header=",".join(params.wpar_vars_to_save))
 
         ft = os.path.join("trajectories", "time.dat")
