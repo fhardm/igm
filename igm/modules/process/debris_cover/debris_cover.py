@@ -97,13 +97,43 @@ def params(parser):
         default=False,
         help="Build a moraine using off-glacier immobile particles (default: False)",
     )
+    parser.add_argument(
+        "--part_latdiff_beta",
+        type=int,
+        default=0,
+        help="Lateral diffusion factor beta for surface debris particles (m yr-1; default: 0 (no diffusion))",
+    )
     
     # SMB
+    parser.add_argument(
+        "--smb_type",
+        type=str,
+        default="Anderson2016",
+        help="SMB-debris relationship type (default: Anderson2016)",
+    )
     parser.add_argument(
         "--smb_oestrem_D0",
         type=int,
         default=0.065,
         help="Characteristic debris thickness in Oestrem curve calculation (default: 0.065)",
+    )
+    parser.add_argument(
+        "--smb_h_eff",
+        type=int,
+        default=0.016,
+        help="Debris thickness for maximum melt enhancement (Compagno et al. 2021 SMB; default: 0.016)",
+    )
+    parser.add_argument(
+        "--smb_h_crit",
+        type=int,
+        default=0.036,
+        help="Critical debris thickness where melt enhancement/reduction factor = 1 (Compagno et al. 2021 SMB; default: 0.036)",
+    )
+    parser.add_argument(
+        "--smb_k_debris",
+        type=int,
+        default=0.03,
+        help="Oestrem curve shape factor (Compagno et al. 2021 SMB; default: 0.03)",
     )
 
 
@@ -115,6 +145,9 @@ def update(params, state):
     if state.t.numpy() >= params.time_start + params.part_seeding_delay:
         # update the particle tracking by calling the particles function, adapted from module particles.py
         state = deb_particles(params, state)
+        if params.part_latdiff_beta > 0:
+            # update the lateral diffusion of surface debris particles
+            state = deb_latdiff(params, state)
         # update debris thickness based on particle count in grid cells (at every SMB update time step)
         state = deb_thickness(params, state)
         # update the mass balance (SMB) depending by debris thickness, using clean-ice SMB from smb_simple.py
@@ -610,7 +643,59 @@ def deb_initial_rockfall(params, state):
     )[0, :, 0]
     
     return state
+
+def deb_latdiff(params, state):
+    """
+    Calculates the lateral diffusion of surface debris particles based on their positions and velocities.
     
+    Parameters:
+    params (object): An object containing parameters required for the calculation.
+    state (object): An object representing the current state of the glacier, including
+                    attributes such as particle positions and velocities.
+    
+    Returns:
+    state: The function updates the particle positions in the `state` object in place.
+    """
+    
+    # Calculate the lateral diffusion of surface debris particles
+    mask = state.particle_r == 1
+    filtered_particle_x = tf.boolean_mask(state.particle_x, mask)
+    filtered_particle_y = tf.boolean_mask(state.particle_y, mask)
+
+    # Interpolate slope and aspect at the filtered positions
+    i = filtered_particle_x / state.dx
+    j = filtered_particle_y / state.dx
+    indices = tf.expand_dims(
+        tf.concat(
+            [tf.expand_dims(j, axis=-1), tf.expand_dims(i, axis=-1)], axis=-1
+        ),
+        axis=0,
+    )
+
+    filtered_slope = interpolate_bilinear_tf(
+        tf.expand_dims(tf.expand_dims(state.slope_rad, axis=0), axis=-1),
+        indices,
+        indexing="ij",
+    )[0, :, 0]
+
+    filtered_aspect = interpolate_bilinear_tf(
+        tf.expand_dims(tf.expand_dims(state.aspect_rad, axis=0), axis=-1),
+        indices,
+        indexing="ij",
+    )[0, :, 0]
+
+    # Move the filtered particles in the aspect direction, scaled by slope and a custom factor beta
+    beta = params.part_latdiff_beta  # Custom scaling factor
+    displacement_x = beta * tf.math.sin(filtered_aspect) * tf.math.tan(filtered_slope) * state.dt
+    displacement_y = beta * tf.math.cos(filtered_aspect) * tf.math.tan(filtered_slope) * state.dt
+
+    filtered_particle_x += displacement_x
+    filtered_particle_y += displacement_y
+    
+    # Update the particle positions in the state
+    state.particle_x = tf.tensor_scatter_nd_update(state.particle_x, tf.where(mask), filtered_particle_x)
+    state.particle_y = tf.tensor_scatter_nd_update(state.particle_y, tf.where(mask), filtered_particle_y)
+    return state    
     
 def deb_thickness(params, state):
     """
@@ -692,16 +777,13 @@ def deb_smb(params, state):
         
         # adjust smb based on debris thickness
         if hasattr(state, "debthick"):
-            mask = state.debthick > 0
-            state.smb = tf.where(mask, state.smb * params.smb_oestrem_D0 / (params.smb_oestrem_D0 + state.debthick), state.smb)
-            
-            # # Compagno et al. (2021) debris-SMB adjustment including melt enhancement at thin debris thicknesses
-            # h_eff = 0.016
-            # h_crit = 0.036
-            # k_debris = 0.03
-            # mask_eff = tf.logical_and(state.debthick > h_eff, state.debthick > 0)
-            # state.smb = tf.where(mask_eff, state.smb * (k_debris + h_crit)/(state.debthick + k_debris), state.smb)
-            # state.smb = tf.where(~mask_eff, state.smb * ((k_debris + h_crit)/(state.debthick + k_debris) * state.debthick/h_eff + (h_eff - state.debthick)/h_eff), state.smb)
+            if params.smb_type == "Anderson2016": # Anderson et al. (2016) debris-SMB adjustment (inverse relationship)
+                mask = state.debthick > 0
+                state.smb = tf.where(mask, state.smb * params.smb_oestrem_D0 / (params.smb_oestrem_D0 + state.debthick), state.smb)
+            elif params.smb_type == "Compagno2021": # Compagno et al. (2021) debris-SMB adjustment including melt enhancement at thin debris thicknesses
+                mask_eff = tf.logical_and(state.debthick > params.smb_h_eff, state.debthick > 0)
+                state.smb = tf.where(mask_eff, state.smb * (params.smb_k_debris + params.smb_h_crit)/(state.debthick + params.smb_k_debris), state.smb)
+                state.smb = tf.where(~mask_eff, state.smb * ((params.smb_k_debris + params.smb_h_crit)/(params.smb_h_eff + params.smb_k_debris) * state.debthick/params.smb_h_eff + (params.smb_h_eff - state.debthick)/params.smb_h_eff), state.smb)
     return state
 
 
